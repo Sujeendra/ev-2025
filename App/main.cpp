@@ -79,11 +79,11 @@ bool IsConnectedForDCCharging = false;
 bool IsConnectedForACCharging=false;
 LogManager logManager;
 bool SendGPIOSignal = false;
-bool HVReq=false;
+bool HVReq=false;  // High voltage request
 bool IsBatteryContactorClosed = false;
 std::vector<uint32_t> frameIdsToForward = {0x1918FF71, 0x1919FF71, 0x191AFF71, 0xCFF91FD, 0xCFF92FD}; // both  sevcon hvlp and editron inverter data is forwarded but hvlp one is assumed we have to configure it for three  todo
 
-
+//can 0 is always code as vehicle CAN
 
 class TableModel : public QAbstractTableModel
 {
@@ -155,7 +155,7 @@ void CreateSDMData(QCanDbcFileParser& fileParser, std::unordered_map<std::string
                     // Check if the element was found in SDM
                     if (value_it != (*result).SDM.end()) {
                         // Add check to read value from shared data if it has changed there
-                        for (int i = 0; i < 6; ++i) {
+                        for (int i = 0; i < dataVec.size(); ++i) {
                             if ((*result).messageId29Bit == dataVec[i].pgn && signal.name().toStdString() == dataVec[i].signal) {
 
                                 //here check for the IsSent variable to change value dynamically -- todo: check the logic again
@@ -520,6 +520,7 @@ private:
                     nextSendTime[pair.first] = std::chrono::steady_clock::now();
                     continue;
                 }
+
                 std::string messageId = pair.first;
                 // if (message.sheetName != "Main")
                 //     continue;
@@ -544,7 +545,7 @@ private:
                             if (msg.transmitter() == target_node && message.SHM[0].message == msg.name()) {
 
                                 quint32 shmId = static_cast<quint32>(msg.uniqueId());
-                                QByteArray shmDataArray(reinterpret_cast<const char*>(message.shmSignedData.data()), message.shmSignedData.size());
+                                QByteArray shmDataArray(reinterpret_cast<const char*>(message.shmSignedData.data()), msg.size());
                                 QCanBusFrame shmFrame(shmId, shmDataArray);
                                 shmFrame.setFrameType(QCanBusFrame::DataFrame);
                                 // if(msg.name()!="S1_ES_PGN61427_SHM_Rx")
@@ -555,7 +556,7 @@ private:
 
                                 QThread::msleep(static_cast<unsigned long>(message.SDM[0].deltaTime));
 
-                                QCanBusFrame sdmFrame(message.messageId29Bit, QByteArray(reinterpret_cast<const char*>(message.sdmSignedData.data()), message.sdmSignedData.size()));
+                                QCanBusFrame sdmFrame(message.messageId29Bit, QByteArray(reinterpret_cast<const char*>(message.sdmSignedData.data()), msg.size()));
                                 sdmFrame.setFrameType(QCanBusFrame::DataFrame);
                                 canBusDevice->writeFrame(sdmFrame);
                                 message.incrementCounter();
@@ -564,10 +565,18 @@ private:
                         }
                     }
                     else{
-                        nextSendTime[messageId] += std::chrono::milliseconds(static_cast<int>(message.SDM[0].cycleTime));
-                        QCanBusFrame sdmFrame(message.messageId29Bit, QByteArray(reinterpret_cast<const char*>(message.sdmSignedData.data()), message.sdmSignedData.size()));
-                        sdmFrame.setFrameType(QCanBusFrame::DataFrame);
-                        canBusDevice->writeFrame(sdmFrame);
+                        // version 2 changes using dlc from the dbc to send only data in the payload
+                        std::string target_node = "Vehicle_Control_Unit";
+                        for (const auto& msg : fileParser.messageDescriptions()) {
+                            if (msg.transmitter() == target_node && message.SDM[0].message == msg.name()) {
+                                nextSendTime[messageId] += std::chrono::milliseconds(static_cast<int>(message.SDM[0].cycleTime));
+                                QCanBusFrame sdmFrame(message.messageId29Bit, QByteArray(reinterpret_cast<const char*>(message.sdmSignedData.data()), msg.size()));
+                                sdmFrame.setFrameType(QCanBusFrame::DataFrame);
+                                canBusDevice->writeFrame(sdmFrame);
+                                break;
+                            }
+                        }
+
 
                     }
                 }
@@ -802,7 +811,7 @@ int main(int argc, char *argv[]) {
 
     // dbManager.createTable();
     // // Insert records
-    // // dbManager.removeAllRecords();
+    // dbManager.removeAllRecords();
     // dbManager.insertRecord("Main", "61427", "S1_ES_PGN61427", "Control_Es_Relay", "0.292", "False", "20", "3");
     // dbManager.insertRecord("Main", "61427", "S1_ES_PGN61427", "Reserved_1_PGN61427", "0.292", "False", "20", "1");
     // dbManager.insertRecord("Main", "61427", "S1_ES_PGN61427", "Service_Mode_Request", "0.292", "False", "20", "3");
@@ -987,7 +996,7 @@ int main(int argc, char *argv[]) {
     // dbManager.insertRecord("nonshm", "65321", "CMD_MOT_9", "cmd_mot_save_resolver_parameters", "nan", "False", "1000", "0");
     // dbManager.insertRecord("nonshm", "65321", "CMD_MOT_9", "cmd_mot_resolver_id_method", "nan", "False", "1000", "0");
     // dbManager.insertRecord("nonshm", "65321", "CMD_MOT_9", "cmd_mot_resolver_offset", "nan", "False", "1000", "0");
-    // dbManager.insertRecord("nonshm", "65296", "CMD_SYS_0", "cmd_sys_request", "nan", "False", "100", "0");
+    // dbManager.insertRecord("nonshm", "65299", "CMD_SYS_0", "cmd_sys_request", "nan", "False", "100", "0");
     // dbManager.insertRecord("nonshm", "65297", "CMD_SYS_1", "cmd_sys_fault_reset", "nan", "False", "10", "1");
     // dbManager.insertRecord("nonshm", "65297", "CMD_SYS_1", "cmd_sys_contactor", "nan", "False", "10", "0");
     // dbManager.insertRecord("nonshm", "65297", "CMD_SYS_1", "cmd_sys_control_switch", "nan", "False", "10", "0");

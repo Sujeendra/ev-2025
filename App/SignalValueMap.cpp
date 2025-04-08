@@ -24,7 +24,7 @@ SignalValueMap::SignalValueMap() {
     populateInitialDictionary();
 
     connect(&m_updateTimer, &QTimer::timeout, this, &SignalValueMap::updateDictionaryValues);
-    m_updateTimer.start(1);  // 1ms interval
+    m_updateTimer.start(200);  // 200ms interval
 
     m_worker = new CanWorker();
     m_workerThread = new QThread();
