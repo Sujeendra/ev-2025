@@ -15,9 +15,9 @@ set(QML_IMPORT_PATH ${QT_QML_OUTPUT_DIRECTORY}
     CACHE STRING "Import paths for Qt Creator's code model"
     FORCE
 )
-link_directories(C:/Qt/6.8.0/Boot2Qt/raspberrypi-armv8/toolchain/sysroots/cortexa53-poky-linux/usr/lib)
+link_directories(C:/Qt/6.8.1/Boot2Qt/raspberrypi-armv8/toolchain/sysroots/cortexa53-poky-linux/usr/lib)
 
-find_package(Qt6 6.7 REQUIRED COMPONENTS Core Gui Qml Quick VirtualKeyboard sql Charts Graphs SerialBus)
+find_package(Qt6 6.7 REQUIRED COMPONENTS Core Gui Qml Quick VirtualKeyboard Sql Charts Graphs SerialBus)
 qt_standard_project_setup()
 
 # Add sysroot to the search paths for libraries
@@ -77,4 +77,4 @@ install(TARGETS ${CMAKE_PROJECT_NAME}
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
-target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE C:/Qt/6.8.0/Boot2Qt/raspberrypi-armv8/toolchain/sysroots/cortexa53-poky-linux/usr/lib/libgpiod.so.3)
+target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE C:/Qt/6.8.1/Boot2Qt/raspberrypi-armv8/toolchain/sysroots/cortexa53-poky-linux/usr/lib/libgpiod.so.3)
