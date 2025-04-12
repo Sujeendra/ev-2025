@@ -37,6 +37,7 @@ bool DatabaseManager::createTable()
 {
     QSqlQuery query;
     bool success = query.exec("CREATE TABLE IF NOT EXISTS records ("
+                              "NodeName TEXT, "
                               "SheetName TEXT, "
                               "UniqueID TEXT, "
                               "Message TEXT, "
@@ -45,6 +46,7 @@ bool DatabaseManager::createTable()
                               "IsSHM TEXT, "
                               "CycleTime TEXT, "
                               "Value TEXT)");
+
 
     if (!success) {
         qDebug() << "Error: Failed to create table" << query.lastError().text();
@@ -63,14 +65,15 @@ bool DatabaseManager::deleteTable()
     return success;
 }
 
-bool DatabaseManager::insertRecord(const QString &sheetName, const QString &uniqueID, const QString &message,
+bool DatabaseManager::insertRecord(const QString &nodeName, const QString &sheetName, const QString &uniqueID, const QString &message,
                                    const QString &signal, const QString &deltaTime, const QString &isSHM,
                                    const QString &cycleTime, const QString &value)
 {
     QSqlQuery query;
-    query.prepare("INSERT INTO records (SheetName, UniqueID, Message, Signal, DeltaTime, IsSHM, CycleTime, Value) "
-                  "VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+    query.prepare("INSERT INTO records (NodeName, SheetName, UniqueID, Message, Signal, DeltaTime, IsSHM, CycleTime, Value) "
+                  "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
 
+    query.addBindValue(nodeName);
     query.addBindValue(sheetName);
     query.addBindValue(uniqueID);
     query.addBindValue(message);

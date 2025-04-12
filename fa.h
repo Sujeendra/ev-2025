@@ -30,6 +30,7 @@ struct Message {
     std::vector<long double> actual_data;     // Vector for storing actual data values
     uint8_t shmCounter = 0;                   // Counter for SHM entries
     std::string sheetName;                    // Name of the sheet (could be related to DBC file)
+    std::string nodeName;
 
     // Increment the counter and reset if it reaches 32
     void incrementCounter() {

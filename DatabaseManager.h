@@ -20,7 +20,7 @@ public:
 
     bool createTable();
     bool deleteTable();
-    bool insertRecord(const QString &sheetName, const QString &uniqueID, const QString &message,
+    bool insertRecord(const QString &nodeName, const QString &sheetName, const QString &uniqueID, const QString &message,
                       const QString &signal, const QString &deltaTime, const QString &isSHM,
                       const QString &cycleTime, const QString &value);
     bool deleteRecord(const QString &condition);

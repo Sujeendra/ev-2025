@@ -158,24 +158,6 @@ void CreateSDMData(QCanDbcFileParser& fileParser, std::unordered_map<std::string
                         for (int i = 0; i < dataVec.size(); ++i) {
                             if ((*result).messageId29Bit == dataVec[i].pgn && signal.name().toStdString() == dataVec[i].signal) {
 
-                                //here check for the IsSent variable to change value dynamically -- todo: check the logic again
-                                // if(dataVec[i].pgn == 0xCEFF321){
-                                //     //basically sending disconnect once before sending connect for driving or charging as per the manual
-                                //     if(IsConnectForDriving || IsConnectedForACCharging || IsConnectedForDCCharging){
-                                //         if(!dataVec[i].IsSent){
-                                //             dataVec[i].value = 0;
-                                //             dataVec[i].IsSent = true;
-                                //         }
-                                //         else{
-                                //             if(IsConnectForDriving)
-                                //                 dataVec[i].value = 3;
-                                //             else if(IsConnectedForACCharging)
-                                //                 dataVec[i].value = 2;
-                                //             else if(IsConnectedForDCCharging)
-                                //                 dataVec[i].value = 5;
-                                //         }
-                                //     }
-                                // }
                                 value_it->value = dataVec[i].value;
                             }
                         }
@@ -473,10 +455,10 @@ void delayedSetGpio(int pin, bool status) {
     std::this_thread::sleep_for(std::chrono::milliseconds(2000));  // Sleep for 2 seconds
     setGpioPin(pin, status);  // Call the function after sleep
 }
-class CanMessageSender : public QThread {
+class CanMessageSenderGroup1 : public QThread {
     Q_OBJECT
 public:
-    CanMessageSender(QCanDbcFileParser& parser, std::unordered_map<std::string, Message>& messages)
+    CanMessageSenderGroup1(QCanDbcFileParser& parser, std::unordered_map<std::string, Message>& messages)
         : fileParser(parser), messages(messages) {}
 
 protected:
@@ -622,44 +604,115 @@ private:
     }
 };
 
-// class CanNonSHMMessageSender : public QObject {
-//     Q_OBJECT
+class CanMessageSenderGroup2 : public QThread {
+    Q_OBJECT
+public:
+    CanMessageSenderGroup2(QCanDbcFileParser& parser, std::unordered_map<std::string, Message>& messages)
+        : fileParser(parser), messages(messages) {}
 
-// public:
-//     CanNonSHMMessageSender(QCanDbcFileParser& parser, std::unordered_map<std::string, Message>& messages)
-//         : fileParser(parser), messages(messages) {}
+protected:
+    void run() override {
+        sendShmSDMMessage(fileParser, messages);
+    }
 
-//     void initialize() {
-//         // Initialize CAN Bus Device
-//         canDevice = QCanBus::instance()->createDevice("socketcan", "can0");
-//         if (!canDevice) {
-//             qWarning() << "Error: Could not create CAN device.";
-//             return;
-//         }
+private:
+    QCanDbcFileParser& fileParser;
+    std::unordered_map<std::string, Message>& messages;
 
-//         if (!canDevice->connectDevice()) {
-//             qWarning() << "Error: Could not connect to CAN device.";
-//             return;
-//         }
+    void sendShmSDMMessage(QCanDbcFileParser& fileParser, std::unordered_map<std::string, Message>& messages) {
 
-//         qDebug() << "CAN device connected successfully.";
+        std::unordered_map<std::string, std::chrono::steady_clock::time_point> nextSendTime;
+        for (auto& pair : messages) {
+            nextSendTime[pair.first] = std::chrono::steady_clock::now();
+        }
 
-//         // Connect to frame reception
-//         connect(canDevice, &QCanBusDevice::framesReceived, this, &CanNonSHMMessageSender::processFrames);
-//     }
+        QCanBusDevice* canBusDevice = QCanBus::instance()->createDevice("socketcan", "can0");
+        canBusDevice->connectDevice();
+        while (true) {
 
-// private:
-//     QCanBusDevice *canDevice = nullptr;
-//     QCanDbcFileParser& fileParser;
-//     std::unordered_map<std::string, Message>& messages;
+            if(!IsDataTransmissionStarted)
+            {
+                //reset timing
+                for (auto& pair : messages) {
+                    nextSendTime[pair.first] = std::chrono::steady_clock::now();
+                }
+                continue;
+            }
 
-//     void processFrames() {
+            // Prepare SHM and SDM data and send them via CAN bus
+            for (auto& pair : messages) {
 
-//     }
+                auto& message = pair.second;
+                //if not connected for driving dont send this message
+                if(message.SDM[0].message == "S1_ES_PGN61427" && !IsConnectForDriving && !HVReq)
+                {
+                    nextSendTime[pair.first] = std::chrono::steady_clock::now();
+                    continue;
+                }
+
+                std::string messageId = pair.first;
+                // if (message.sheetName != "Main")
+                //     continue;
+
+                auto now = std::chrono::steady_clock::now();
+                if (now >= nextSendTime[messageId]) {
+                    auto timeDifference = std::chrono::duration_cast<std::chrono::milliseconds>(now - nextSendTime[messageId]);
+                    // Add the cycleTime to the timeDifference
+                    auto totalTime = timeDifference + std::chrono::milliseconds(static_cast<int>(message.SDM[0].cycleTime));
+
+                    // stream << totalTime.count() << ","
+                    //        <<  QString::number(message.messageId29Bit, 16).toUpper() << "\n";
+                    CreateSDMData(fileParser, messages);
+
+                    if(message.sheetName == "Main")
+                        CreateSHMData(pair, message.shmCounter);
+
+                    if(message.sheetName == "Main")
+                    {
+                        std::string target_node = "Vehicle_Control_Unit";
+                        for (const auto& msg : fileParser.messageDescriptions()) {
+                            if (msg.transmitter() == target_node && message.SHM[0].message == msg.name()) {
+
+                                quint32 shmId = static_cast<quint32>(msg.uniqueId());
+                                QByteArray shmDataArray(reinterpret_cast<const char*>(message.shmSignedData.data()), msg.size());
+                                QCanBusFrame shmFrame(shmId, shmDataArray);
+                                shmFrame.setFrameType(QCanBusFrame::DataFrame);
+                                // if(msg.name()!="S1_ES_PGN61427_SHM_Rx")
+                                canBusDevice->writeFrame(shmFrame);
 
 
+                                nextSendTime[messageId] += std::chrono::milliseconds(static_cast<int>(message.SHM[0].cycleTime));
 
-// };
+                                QThread::msleep(static_cast<unsigned long>(message.SDM[0].deltaTime));
+
+                                QCanBusFrame sdmFrame(message.messageId29Bit, QByteArray(reinterpret_cast<const char*>(message.sdmSignedData.data()), msg.size()));
+                                sdmFrame.setFrameType(QCanBusFrame::DataFrame);
+                                canBusDevice->writeFrame(sdmFrame);
+                                message.incrementCounter();
+                                break;
+                            }
+                        }
+                    }
+                    else{
+                        // version 2 changes using dlc from the dbc to send only data in the payload
+                        std::string target_node = "Vehicle_Control_Unit";
+                        for (const auto& msg : fileParser.messageDescriptions()) {
+                            if (msg.transmitter() == target_node && message.SDM[0].message == msg.name()) {
+                                nextSendTime[messageId] += std::chrono::milliseconds(static_cast<int>(message.SDM[0].cycleTime));
+                                QCanBusFrame sdmFrame(message.messageId29Bit, QByteArray(reinterpret_cast<const char*>(message.sdmSignedData.data()), msg.size()));
+                                sdmFrame.setFrameType(QCanBusFrame::DataFrame);
+                                canBusDevice->writeFrame(sdmFrame);
+                                break;
+                            }
+                        }
+
+                    }
+                }
+            }
+        }
+    }
+};
+
 
 class MainController : public QObject
 {
@@ -748,7 +801,26 @@ public:
         }
     }
 };
+void splitMessagesByNodeName(
+    const std::unordered_map<std::string, Message>& inputMessages,
+    const std::vector<std::string>& group1NodeNames,
+    const std::vector<std::string>& group2NodeNames,
+    std::unordered_map<std::string, Message>& group1Messages,
+    std::unordered_map<std::string, Message>& group2Messages)
+{
+    for (const auto& [key, message] : inputMessages) {
+        const std::string& node = message.nodeName;
 
+        if (std::find(group1NodeNames.begin(), group1NodeNames.end(), node) != group1NodeNames.end()) {
+            group1Messages[key] = message;
+        } else if (std::find(group2NodeNames.begin(), group2NodeNames.end(), node) != group2NodeNames.end()) {
+            group2Messages[key] = message;
+        }
+        else{
+            qDebug()<<"Failed splitting message -- check here immediately";
+        }
+    }
+}
 
 int main(int argc, char *argv[]) {
     set_qt_environment();
@@ -808,233 +880,236 @@ int main(int argc, char *argv[]) {
 
     // Create table
     DatabaseManager dbManager;
+    //NodeName, SheetName, UniqueID, Message, Signal, DeltaTime, IsSHM,CycleTime,Value -- columns order
 
+    // uncomment table creation only if table is not created or you have flashed the rpi
     // dbManager.createTable();
-    // // Insert records
+
+    //if you feel the data has been modified from ui unknowingly remove and resinert everything again
     // dbManager.removeAllRecords();
-    // dbManager.insertRecord("Main", "61427", "S1_ES_PGN61427", "Control_Es_Relay", "0.292", "False", "20", "3");
-    // dbManager.insertRecord("Main", "61427", "S1_ES_PGN61427", "Reserved_1_PGN61427", "0.292", "False", "20", "1");
-    // dbManager.insertRecord("Main", "61427", "S1_ES_PGN61427", "Service_Mode_Request", "0.292", "False", "20", "3");
-    // dbManager.insertRecord("Main", "61427", "S1_ES_PGN61427", "Reserved_2_PGN61427", "0.292", "False", "20", "429496729"); //keep max value from dbc
-    // dbManager.insertRecord("Main", "61427", "S1_ES_PGN61427", "Terminal_Voltage_Actual", "0.292", "False", "20", "2000");
-    // dbManager.insertRecord("Main", "61427", "S1_ES_PGN61427", "Counter_PGN61427", "0.292", "False", "20", "15");
-    // dbManager.insertRecord("Main", "61427", "S1_ES_PGN61427", "CRC_PGN61427", "0.292", "False", "20", "255");
-    // dbManager.insertRecord("Main", "61427", "S1_ES_PGN61427", "ShutDown_Clearance", "0.292", "False", "20", "3");
-    // dbManager.insertRecord("Main", "61427", "S1_ES_PGN61427_SHM_Rx", "Inv_SDM_Data_Pg_Rx_61427", "nan", "True", "20", "1");
-    // dbManager.insertRecord("Main", "61427", "S1_ES_PGN61427_SHM_Rx", "Inv_SDM_E_Data_Pg_Rx_61427", "nan", "True", "20", "1");
-    // dbManager.insertRecord("Main", "61427", "S1_ES_PGN61427_SHM_Rx", "SHM_Reserved_Rx_61427", "nan", "True", "20", "1");
-    // dbManager.insertRecord("Main", "61427", "S1_ES_PGN61427_SHM_Rx", "Sequence_Number_Rx_61427", "nan", "True", "20", "15");
-    // dbManager.insertRecord("Main", "61427", "S1_ES_PGN61427_SHM_Rx", "Inv_SDM_SA_Rx_61427", "nan", "True", "20", "0");
-    // dbManager.insertRecord("Main", "61427", "S1_ES_PGN61427_SHM_Rx", "Inv_SDM_PS_Value_Rx_61427", "nan", "True", "20", "0");
-    // dbManager.insertRecord("Main", "61427", "S1_ES_PGN61427_SHM_Rx", "Inv_SDM_PF_Value_Rx_61427", "nan", "True", "20", "0");
-    // dbManager.insertRecord("Main", "61427", "S1_ES_PGN61427_SHM_Rx", "SDM_Data_CRC_Rx_61427", "nan", "True", "20", "0");
-    // dbManager.insertRecord("Main", "6912", "HVESSC1_PGN6912_Rx1", "HS_HiUBusCnctCmd_Rx1", "0.567", "False", "20", "1");
-    // dbManager.insertRecord("Main", "6912", "HVESSC1_PGN6912_Rx1", "HS_PwrDwnCmd_Rx1", "0.567", "False", "20", "3");
-    // dbManager.insertRecord("Main", "6912", "HVESSC1_PGN6912_Rx1", "HS_HiUBusAcvIslnTestCmd_Rx1", "0.567", "False", "20", "2");
-    // dbManager.insertRecord("Main", "6912", "HVESSC1_PGN6912_Rx1", "HS_HiUBusPasIslnTestCmd_Rx1", "0.567", "False", "20", "2");
-    // dbManager.insertRecord("Main", "6912", "HVESSC1_PGN6912_Rx1", "HS_CellBalnCmd_Rx1", "0.567", "False", "20", "3");
-    // dbManager.insertRecord("Main", "6912", "HVESSC1_PGN6912_Rx1", "HS_EnaIntChrgrCmd_Rx1", "0.567", "False", "20", "3");
-    // dbManager.insertRecord("Main", "6912", "HVESSC1_PGN6912_Rx1", "HS_OperConsent_Rx1", "0.567", "False", "20", "1");
-    // dbManager.insertRecord("Main", "6912", "HVESSC1_PGN6912_Rx1", "HS_HiUBusHiSideRestrCnctReq_Rx1", "0.567", "False", "20", "3");
-    // dbManager.insertRecord("Main", "6912", "HVESSC1_PGN6912_Rx1", "HS_HiUBusLoSideRestrCnctReq_Rx1", "0.567", "False", "20", "3");
-    // dbManager.insertRecord("Main", "6912", "HVESSC1_PGN6912_Rx1", "HS_Ctl1Ctr_Rx1", "0.567", "False", "20", "15");
-    // dbManager.insertRecord("Main", "6912", "HVESSC1_PGN6912_Rx1", "HS_Ctl1CRC_Rx1", "0.567", "False", "20", "255");
-    // dbManager.insertRecord("Main", "6912", "HVESSC1_PGN6912_SHM_Rx1", "Inv_SDM_Data_Pg_Rx1_6912", "nan", "True", "20", "1");
-    // dbManager.insertRecord("Main", "6912", "HVESSC1_PGN6912_SHM_Rx1", "Inv_SDM_E_Data_Pg_Rx1_6912", "nan", "True", "20", "1");
-    // dbManager.insertRecord("Main", "6912", "HVESSC1_PGN6912_SHM_Rx1", "SHM_Reserved_Rx1_6912", "nan", "True", "20", "1");
-    // dbManager.insertRecord("Main", "6912", "HVESSC1_PGN6912_SHM_Rx1", "Sequence_Number_Rx1_6912", "nan", "True", "20", "23");
-    // dbManager.insertRecord("Main", "6912", "HVESSC1_PGN6912_SHM_Rx1", "Inv_SDM_SA_Rx1_6912", "nan", "True", "20", "0");
-    // dbManager.insertRecord("Main", "6912", "HVESSC1_PGN6912_SHM_Rx1", "Inv_SDM_PS_Value_Rx1_6912", "nan", "True", "20", "0");
-    // dbManager.insertRecord("Main", "6912", "HVESSC1_PGN6912_SHM_Rx1", "Inv_SDM_PF_Value_Rx1_6912", "nan", "True", "20", "0");
-    // dbManager.insertRecord("Main", "6912", "HVESSC1_PGN6912_SHM_Rx1", "SDM_Data_CRC_Rx1_6912", "nan", "True", "20", "0");
-    // dbManager.insertRecord("Main", "61483", "CN_PGN61483", "Crash_Typ", "2", "False", "20", "0");
-    // dbManager.insertRecord("Main", "61483", "CN_PGN61483", "Crash_Ctr", "2", "False", "20", "11");
-    // dbManager.insertRecord("Main", "61483", "CN_PGN61483", "Crash_Cks", "2", "False", "20", "4");
-    // dbManager.insertRecord("Main", "61483", "CN_PGN61483_SHM_Rx", "Inv_SDM_Data_Pg_Rx_61483", "nan", "True", "20", "1");
-    // dbManager.insertRecord("Main", "61483", "CN_PGN61483_SHM_Rx", "Inv_SDM_E_Data_Pg_Rx_61483", "nan", "True", "20", "1");
-    // dbManager.insertRecord("Main", "61483", "CN_PGN61483_SHM_Rx", "SHM_Reserved_Rx_61483", "nan", "True", "20", "1");
-    // dbManager.insertRecord("Main", "61483", "CN_PGN61483_SHM_Rx", "Sequence_Number_Rx_61483", "nan", "True", "20", "27");
-    // dbManager.insertRecord("Main", "61483", "CN_PGN61483_SHM_Rx", "Inv_SDM_SA_Rx_61483", "nan", "True", "20", "0");
-    // dbManager.insertRecord("Main", "61483", "CN_PGN61483_SHM_Rx", "Inv_SDM_PS_Value_Rx_61483", "nan", "True", "20", "0");
-    // dbManager.insertRecord("Main", "61483", "CN_PGN61483_SHM_Rx", "Inv_SDM_PF_Value_Rx_61483", "nan", "True", "20", "0");
-    // dbManager.insertRecord("Main", "61483", "CN_PGN61483_SHM_Rx", "SDM_Data_CRC_Rx_61483", "nan", "True", "20", "0");
-    // dbManager.insertRecord("Main", "65265", "CCVS1_PGN65265", "Two_Spd_Axle_Switch", "1.427", "False", "100", "3");
-    // dbManager.insertRecord("Main", "65265", "CCVS1_PGN65265", "Parking_Brake_Swtch", "1.427", "False", "100", "3");
-    // dbManager.insertRecord("Main", "65265", "CCVS1_PGN65265", "Cruise_Control_Pause_Swtch", "1.427", "False", "100", "3");
-    // dbManager.insertRecord("Main", "65265", "CCVS1_PGN65265", "Park_Brake_Rel_Inhibit_Req", "1.427", "False", "100", "3");
-    // dbManager.insertRecord("Main", "65265", "CCVS1_PGN65265", "Wheel_Based_Veh_Spd", "1.427", "False", "100", "0");
-    // dbManager.insertRecord("Main", "65265", "CCVS1_PGN65265", "Cruise_Control_Active", "1.427", "False", "100", "3");
-    // dbManager.insertRecord("Main", "65265", "CCVS1_PGN65265", "Cruise_Control_Enable_Swtch", "1.427", "False", "100", "3");
-    // dbManager.insertRecord("Main", "65265", "CCVS1_PGN65265", "Brake_Switch", "1.427", "False", "100", "3");
-    // dbManager.insertRecord("Main", "65265", "CCVS1_PGN65265", "Clutch_Switch", "1.427", "False", "100", "3");
-    // dbManager.insertRecord("Main", "65265", "CCVS1_PGN65265", "Cruise_Control_SetSwtch", "1.427", "False", "100", "3");
-    // dbManager.insertRecord("Main", "65265", "CCVS1_PGN65265", "Cruise_Control_Coast_Decl_Switch", "1.427", "False", "100", "3");
-    // dbManager.insertRecord("Main", "65265", "CCVS1_PGN65265", "Cruise_Control_Resume_Swtch", "1.427", "False", "100", "3");
-    // dbManager.insertRecord("Main", "65265", "CCVS1_PGN65265", "Cruise_Control_Accelerate_Swtch", "1.427", "False", "100", "3");
-    // dbManager.insertRecord("Main", "65265", "CCVS1_PGN65265", "Cruise_Control_Set_Spd", "1.427", "False", "100", "255");
-    // dbManager.insertRecord("Main", "65265", "CCVS1_PGN65265", "PTO_Governor_State", "1.427", "False", "100", "0");
-    // dbManager.insertRecord("Main", "65265", "CCVS1_PGN65265", "Cruise_Control_States", "1.427", "False", "100", "7");
-    // dbManager.insertRecord("Main", "65265", "CCVS1_PGN65265", "Engine_Idle_Increment_Switch", "1.427", "False", "100", "3");
-    // dbManager.insertRecord("Main", "65265", "CCVS1_PGN65265", "Engine_Idle_Decrement_Switch", "1.427", "False", "100", "3");
-    // dbManager.insertRecord("Main", "65265", "CCVS1_PGN65265", "Engine_Diag_Test_Mode_Swtch", "1.427", "False", "100", "3");
-    // dbManager.insertRecord("Main", "65265", "CCVS1_PGN65265", "Engine_Shutdwn_Ovride_Swtch", "1.427", "False", "100", "3");
-    // dbManager.insertRecord("Main", "65265", "CCVS1_PGN65265_SHM_Rx", "Inv_SDM_Data_Pg_Rx_65265", "nan", "True", "100", "1");
-    // dbManager.insertRecord("Main", "65265", "CCVS1_PGN65265_SHM_Rx", "Inv_SDM_E_Data_Pg_Rx_65265", "nan", "True", "100", "1");
-    // dbManager.insertRecord("Main", "65265", "CCVS1_PGN65265_SHM_Rx", "SHM_Reserved_Rx_65265", "nan", "True", "100", "1");
-    // dbManager.insertRecord("Main", "65265", "CCVS1_PGN65265_SHM_Rx", "Sequence_Number_Rx_65265", "nan", "True", "100", "13");
-    // dbManager.insertRecord("Main", "65265", "CCVS1_PGN65265_SHM_Rx", "Inv_SDM_SA_Rx_65265", "nan", "True", "100", "0");
-    // dbManager.insertRecord("Main", "65265", "CCVS1_PGN65265_SHM_Rx", "Inv_SDM_PS_Value_Rx_65265", "nan", "True", "100", "0");
-    // dbManager.insertRecord("Main", "65265", "CCVS1_PGN65265_SHM_Rx", "Inv_SDM_PF_Value_Rx_65265", "nan", "True", "100", "0");
-    // dbManager.insertRecord("Main", "65265", "CCVS1_PGN65265_SHM_Rx", "SDM_Data_CRC_Rx_65265", "nan", "True", "100", "0");
-    // dbManager.insertRecord("nonshm", "600", "VCU", "VCU_DCDC_Command", "nan", "False", "200", "0");
-    // dbManager.insertRecord("nonshm", "600", "VCU", "VCU_DCDC_SetV", "nan", "False", "200", "14");
-    // dbManager.insertRecord("nonshm", "600", "VCU", "VCU_DCDC_MaxI", "nan", "False", "200", "10");
-    // dbManager.insertRecord("nonshm", "0", "BMS", "BMS_Max_Voltage", "nan", "False", "1000", "300");
-    // dbManager.insertRecord("nonshm", "0", "BMS", "BMS_Max_Current", "nan", "False", "1000", "60");
-    // dbManager.insertRecord("nonshm", "0", "BMS", "BMS_Mode", "nan", "False", "1000", "0");
-    // dbManager.insertRecord("nonshm", "0", "BMS", "BMS_Control", "nan", "False", "1000", "0");
-    // editron and hvlp inverter database data below
 
-    //SheetName, UniqueID, Message, Signal, DeltaTime, IsSHM,CycleTime,Value -- columns order
-    //hvlp inverter migration --> set to torque mode
-    // dbManager.insertRecord("nonshm", "1", "HC1_Demands", "Torque_Request", "nan", "False", "20", "100");
-    // dbManager.insertRecord("nonshm", "1", "HC1_Demands", "ControlWord", "nan", "False", "20", "5"); //transition from 6->3->5 when connected for driving only
-    // dbManager.insertRecord("nonshm", "1", "HC1_Demands", "Torque_Traction_Limit", "nan", "False", "20", "10");
-    // dbManager.insertRecord("nonshm", "1", "HC1_Demands", "SEQ_Command1", "nan", "False", "20", "0");
-    // dbManager.insertRecord("nonshm", "1", "HC1_Demands", "CS_Command1", "nan", "False", "20", "0");
-    // dbManager.insertRecord("nonshm", "2", "HC2_Demands", "Torque_Regen_Limit", "nan", "False", "20", "-10");
-    // dbManager.insertRecord("nonshm", "2", "HC2_Demands", "Speed_Limit_Forward", "nan", "False", "20", "100");
-    // dbManager.insertRecord("nonshm", "2", "HC2_Demands", "Speed_Limit_Reverse", "nan", "False", "20", "-100"); // we have to handle signed data properly for hvlp alone
-    // dbManager.insertRecord("nonshm", "2", "HC2_Demands", "SEQ_Command2", "nan", "False", "20", "0");
-    // dbManager.insertRecord("nonshm", "2", "HC2_Demands", "CS_Command2", "nan", "False", "20", "0");
-    // dbManager.insertRecord("nonshm", "3", "HC3_Battery_Demands", "DC_Link_Imax_Discharge", "nan", "False", "20", "10");
-    // dbManager.insertRecord("nonshm", "3", "HC3_Battery_Demands", "DC_Link_Imax_Recharge", "nan", "False", "20", "-5");
-    // dbManager.insertRecord("nonshm", "3", "HC3_Battery_Demands", "DC_Link_Voltage_Target", "nan", "False", "20", "0");
-    // dbManager.insertRecord("nonshm", "3", "HC3_Battery_Demands", "SEQ_CurrentLimits", "nan", "False", "20", "0");
-    // dbManager.insertRecord("nonshm", "3", "HC3_Battery_Demands", "CS_CurrentLimits", "nan", "False", "20", "0");
+    // vig/battery data
 
-    // dbManager.insertRecord("nonshm", "4", "HC1_Demands_2", "Torque_Request", "nan", "False", "20", "100");
-    // dbManager.insertRecord("nonshm", "4", "HC1_Demands_2", "ControlWord", "nan", "False", "20", "5"); //may be we have to set 3 first and then 5 energise followed by enable
-    // dbManager.insertRecord("nonshm", "4", "HC1_Demands_2", "Torque_Traction_Limit", "nan", "False", "20", "10");
-    // dbManager.insertRecord("nonshm", "4", "HC1_Demands_2", "SEQ_Command1", "nan", "False", "20", "0");
-    // dbManager.insertRecord("nonshm", "4", "HC1_Demands_2", "CS_Command1", "nan", "False", "20", "0");
-    // dbManager.insertRecord("nonshm", "5", "HC2_Demands_2", "Torque_Regen_Limit", "nan", "False", "20", "-10");
-    // dbManager.insertRecord("nonshm", "5", "HC2_Demands_2", "Speed_Limit_Forward", "nan", "False", "20", "100");
-    // dbManager.insertRecord("nonshm", "5", "HC2_Demands_2", "Speed_Limit_Reverse", "nan", "False", "20", "-100"); // we have to handle signed data properly for hvlp alone
-    // dbManager.insertRecord("nonshm", "5", "HC2_Demands_2", "SEQ_Command2", "nan", "False", "20", "0");
-    // dbManager.insertRecord("nonshm", "5", "HC2_Demands_2", "CS_Command2", "nan", "False", "20", "0");
-    // dbManager.insertRecord("nonshm", "6", "HC3_Battery_Demands_2", "DC_Link_Imax_Discharge", "nan", "False", "20", "10");
-    // dbManager.insertRecord("nonshm", "6", "HC3_Battery_Demands_2", "DC_Link_Imax_Recharge", "nan", "False", "20", "-5");
-    // dbManager.insertRecord("nonshm", "6", "HC3_Battery_Demands_2", "DC_Link_Voltage_Target", "nan", "False", "20", "0");
-    // dbManager.insertRecord("nonshm", "6", "HC3_Battery_Demands_2", "SEQ_CurrentLimits", "nan", "False", "20", "0");
-    // dbManager.insertRecord("nonshm", "6", "HC3_Battery_Demands_2", "CS_CurrentLimits", "nan", "False", "20", "0");
+    // dbManager.insertRecord("vig", "Main", "61427", "S1_ES_PGN61427", "Control_Es_Relay", "0.292", "False", "20", "3");
+    // dbManager.insertRecord("vig", "Main", "61427", "S1_ES_PGN61427", "Reserved_1_PGN61427", "0.292", "False", "20", "1");
+    // dbManager.insertRecord("vig", "Main", "61427", "S1_ES_PGN61427", "Service_Mode_Request", "0.292", "False", "20", "3");
+    // dbManager.insertRecord("vig", "Main", "61427", "S1_ES_PGN61427", "Reserved_2_PGN61427", "0.292", "False", "20", "429496729"); //keep max value from dbc
+    // dbManager.insertRecord("vig", "Main", "61427", "S1_ES_PGN61427", "Terminal_Voltage_Actual", "0.292", "False", "20", "2000");
+    // dbManager.insertRecord("vig", "Main", "61427", "S1_ES_PGN61427", "Counter_PGN61427", "0.292", "False", "20", "15");
+    // dbManager.insertRecord("vig", "Main", "61427", "S1_ES_PGN61427", "CRC_PGN61427", "0.292", "False", "20", "255");
+    // dbManager.insertRecord("vig", "Main", "61427", "S1_ES_PGN61427", "ShutDown_Clearance", "0.292", "False", "20", "3");
+    // dbManager.insertRecord("vig", "Main", "61427", "S1_ES_PGN61427_SHM_Rx", "Inv_SDM_Data_Pg_Rx_61427", "nan", "True", "20", "1");
+    // dbManager.insertRecord("vig", "Main", "61427", "S1_ES_PGN61427_SHM_Rx", "Inv_SDM_E_Data_Pg_Rx_61427", "nan", "True", "20", "1");
+    // dbManager.insertRecord("vig", "Main", "61427", "S1_ES_PGN61427_SHM_Rx", "SHM_Reserved_Rx_61427", "nan", "True", "20", "1");
+    // dbManager.insertRecord("vig", "Main", "61427", "S1_ES_PGN61427_SHM_Rx", "Sequence_Number_Rx_61427", "nan", "True", "20", "15");
+    // dbManager.insertRecord("vig", "Main", "61427", "S1_ES_PGN61427_SHM_Rx", "Inv_SDM_SA_Rx_61427", "nan", "True", "20", "0");
+    // dbManager.insertRecord("vig", "Main", "61427", "S1_ES_PGN61427_SHM_Rx", "Inv_SDM_PS_Value_Rx_61427", "nan", "True", "20", "0");
+    // dbManager.insertRecord("vig", "Main", "61427", "S1_ES_PGN61427_SHM_Rx", "Inv_SDM_PF_Value_Rx_61427", "nan", "True", "20", "0");
+    // dbManager.insertRecord("vig", "Main", "61427", "S1_ES_PGN61427_SHM_Rx", "SDM_Data_CRC_Rx_61427", "nan", "True", "20", "0");
+    // dbManager.insertRecord("vig", "Main", "6912", "HVESSC1_PGN6912_Rx1", "HS_HiUBusCnctCmd_Rx1", "0.567", "False", "20", "1");
+    // dbManager.insertRecord("vig", "Main", "6912", "HVESSC1_PGN6912_Rx1", "HS_PwrDwnCmd_Rx1", "0.567", "False", "20", "3");
+    // dbManager.insertRecord("vig", "Main", "6912", "HVESSC1_PGN6912_Rx1", "HS_HiUBusAcvIslnTestCmd_Rx1", "0.567", "False", "20", "2");
+    // dbManager.insertRecord("vig", "Main", "6912", "HVESSC1_PGN6912_Rx1", "HS_HiUBusPasIslnTestCmd_Rx1", "0.567", "False", "20", "2");
+    // dbManager.insertRecord("vig", "Main", "6912", "HVESSC1_PGN6912_Rx1", "HS_CellBalnCmd_Rx1", "0.567", "False", "20", "3");
+    // dbManager.insertRecord("vig", "Main", "6912", "HVESSC1_PGN6912_Rx1", "HS_EnaIntChrgrCmd_Rx1", "0.567", "False", "20", "3");
+    // dbManager.insertRecord("vig", "Main", "6912", "HVESSC1_PGN6912_Rx1", "HS_OperConsent_Rx1", "0.567", "False", "20", "1");
+    // dbManager.insertRecord("vig", "Main", "6912", "HVESSC1_PGN6912_Rx1", "HS_HiUBusHiSideRestrCnctReq_Rx1", "0.567", "False", "20", "3");
+    // dbManager.insertRecord("vig", "Main", "6912", "HVESSC1_PGN6912_Rx1", "HS_HiUBusLoSideRestrCnctReq_Rx1", "0.567", "False", "20", "3");
+    // dbManager.insertRecord("vig", "Main", "6912", "HVESSC1_PGN6912_Rx1", "HS_Ctl1Ctr_Rx1", "0.567", "False", "20", "15");
+    // dbManager.insertRecord("vig", "Main", "6912", "HVESSC1_PGN6912_Rx1", "HS_Ctl1CRC_Rx1", "0.567", "False", "20", "255");
+    // dbManager.insertRecord("vig", "Main", "6912", "HVESSC1_PGN6912_SHM_Rx1", "Inv_SDM_Data_Pg_Rx1_6912", "nan", "True", "20", "1");
+    // dbManager.insertRecord("vig", "Main", "6912", "HVESSC1_PGN6912_SHM_Rx1", "Inv_SDM_E_Data_Pg_Rx1_6912", "nan", "True", "20", "1");
+    // dbManager.insertRecord("vig", "Main", "6912", "HVESSC1_PGN6912_SHM_Rx1", "SHM_Reserved_Rx1_6912", "nan", "True", "20", "1");
+    // dbManager.insertRecord("vig", "Main", "6912", "HVESSC1_PGN6912_SHM_Rx1", "Sequence_Number_Rx1_6912", "nan", "True", "20", "23");
+    // dbManager.insertRecord("vig", "Main", "6912", "HVESSC1_PGN6912_SHM_Rx1", "Inv_SDM_SA_Rx1_6912", "nan", "True", "20", "0");
+    // dbManager.insertRecord("vig", "Main", "6912", "HVESSC1_PGN6912_SHM_Rx1", "Inv_SDM_PS_Value_Rx1_6912", "nan", "True", "20", "0");
+    // dbManager.insertRecord("vig", "Main", "6912", "HVESSC1_PGN6912_SHM_Rx1", "Inv_SDM_PF_Value_Rx1_6912", "nan", "True", "20", "0");
+    // dbManager.insertRecord("vig", "Main", "6912", "HVESSC1_PGN6912_SHM_Rx1", "SDM_Data_CRC_Rx1_6912", "nan", "True", "20", "0");
+    // dbManager.insertRecord("vig", "Main", "61483", "CN_PGN61483", "Crash_Typ", "2", "False", "20", "0");
+    // dbManager.insertRecord("vig", "Main", "61483", "CN_PGN61483", "Crash_Ctr", "2", "False", "20", "11");
+    // dbManager.insertRecord("vig", "Main", "61483", "CN_PGN61483", "Crash_Cks", "2", "False", "20", "4");
+    // dbManager.insertRecord("vig", "Main", "61483", "CN_PGN61483_SHM_Rx", "Inv_SDM_Data_Pg_Rx_61483", "nan", "True", "20", "1");
+    // dbManager.insertRecord("vig", "Main", "61483", "CN_PGN61483_SHM_Rx", "Inv_SDM_E_Data_Pg_Rx_61483", "nan", "True", "20", "1");
+    // dbManager.insertRecord("vig", "Main", "61483", "CN_PGN61483_SHM_Rx", "SHM_Reserved_Rx_61483", "nan", "True", "20", "1");
+    // dbManager.insertRecord("vig", "Main", "61483", "CN_PGN61483_SHM_Rx", "Sequence_Number_Rx_61483", "nan", "True", "20", "27");
+    // dbManager.insertRecord("vig", "Main", "61483", "CN_PGN61483_SHM_Rx", "Inv_SDM_SA_Rx_61483", "nan", "True", "20", "0");
+    // dbManager.insertRecord("vig", "Main", "61483", "CN_PGN61483_SHM_Rx", "Inv_SDM_PS_Value_Rx_61483", "nan", "True", "20", "0");
+    // dbManager.insertRecord("vig", "Main", "61483", "CN_PGN61483_SHM_Rx", "Inv_SDM_PF_Value_Rx_61483", "nan", "True", "20", "0");
+    // dbManager.insertRecord("vig", "Main", "61483", "CN_PGN61483_SHM_Rx", "SDM_Data_CRC_Rx_61483", "nan", "True", "20", "0");
+    // dbManager.insertRecord("vig", "Main", "65265", "CCVS1_PGN65265", "Two_Spd_Axle_Switch", "1.427", "False", "100", "3");
+    // dbManager.insertRecord("vig", "Main", "65265", "CCVS1_PGN65265", "Parking_Brake_Swtch", "1.427", "False", "100", "3");
+    // dbManager.insertRecord("vig", "Main", "65265", "CCVS1_PGN65265", "Cruise_Control_Pause_Swtch", "1.427", "False", "100", "3");
+    // dbManager.insertRecord("vig", "Main", "65265", "CCVS1_PGN65265", "Park_Brake_Rel_Inhibit_Req", "1.427", "False", "100", "3");
+    // dbManager.insertRecord("vig", "Main", "65265", "CCVS1_PGN65265", "Wheel_Based_Veh_Spd", "1.427", "False", "100", "0");
+    // dbManager.insertRecord("vig", "Main", "65265", "CCVS1_PGN65265", "Cruise_Control_Active", "1.427", "False", "100", "3");
+    // dbManager.insertRecord("vig", "Main", "65265", "CCVS1_PGN65265", "Cruise_Control_Enable_Swtch", "1.427", "False", "100", "3");
+    // dbManager.insertRecord("vig", "Main", "65265", "CCVS1_PGN65265", "Brake_Switch", "1.427", "False", "100", "3");
+    // dbManager.insertRecord("vig", "Main", "65265", "CCVS1_PGN65265", "Clutch_Switch", "1.427", "False", "100", "3");
+    // dbManager.insertRecord("vig", "Main", "65265", "CCVS1_PGN65265", "Cruise_Control_SetSwtch", "1.427", "False", "100", "3");
+    // dbManager.insertRecord("vig", "Main", "65265", "CCVS1_PGN65265", "Cruise_Control_Coast_Decl_Switch", "1.427", "False", "100", "3");
+    // dbManager.insertRecord("vig", "Main", "65265", "CCVS1_PGN65265", "Cruise_Control_Resume_Swtch", "1.427", "False", "100", "3");
+    // dbManager.insertRecord("vig", "Main", "65265", "CCVS1_PGN65265", "Cruise_Control_Accelerate_Swtch", "1.427", "False", "100", "3");
+    // dbManager.insertRecord("vig", "Main", "65265", "CCVS1_PGN65265", "Cruise_Control_Set_Spd", "1.427", "False", "100", "255");
+    // dbManager.insertRecord("vig", "Main", "65265", "CCVS1_PGN65265", "PTO_Governor_State", "1.427", "False", "100", "0");
+    // dbManager.insertRecord("vig", "Main", "65265", "CCVS1_PGN65265", "Cruise_Control_States", "1.427", "False", "100", "7");
+    // dbManager.insertRecord("vig", "Main", "65265", "CCVS1_PGN65265", "Engine_Idle_Increment_Switch", "1.427", "False", "100", "3");
+    // dbManager.insertRecord("vig", "Main", "65265", "CCVS1_PGN65265", "Engine_Idle_Decrement_Switch", "1.427", "False", "100", "3");
+    // dbManager.insertRecord("vig", "Main", "65265", "CCVS1_PGN65265", "Engine_Diag_Test_Mode_Swtch", "1.427", "False", "100", "3");
+    // dbManager.insertRecord("vig", "Main", "65265", "CCVS1_PGN65265", "Engine_Shutdwn_Ovride_Swtch", "1.427", "False", "100", "3");
+    // dbManager.insertRecord("vig", "Main", "65265", "CCVS1_PGN65265_SHM_Rx", "Inv_SDM_Data_Pg_Rx_65265", "nan", "True", "100", "1");
+    // dbManager.insertRecord("vig", "Main", "65265", "CCVS1_PGN65265_SHM_Rx", "Inv_SDM_E_Data_Pg_Rx_65265", "nan", "True", "100", "1");
+    // dbManager.insertRecord("vig", "Main", "65265", "CCVS1_PGN65265_SHM_Rx", "SHM_Reserved_Rx_65265", "nan", "True", "100", "1");
+    // dbManager.insertRecord("vig", "Main", "65265", "CCVS1_PGN65265_SHM_Rx", "Sequence_Number_Rx_65265", "nan", "True", "100", "13");
+    // dbManager.insertRecord("vig", "Main", "65265", "CCVS1_PGN65265_SHM_Rx", "Inv_SDM_SA_Rx_65265", "nan", "True", "100", "0");
+    // dbManager.insertRecord("vig", "Main", "65265", "CCVS1_PGN65265_SHM_Rx", "Inv_SDM_PS_Value_Rx_65265", "nan", "True", "100", "0");
+    // dbManager.insertRecord("vig", "Main", "65265", "CCVS1_PGN65265_SHM_Rx", "Inv_SDM_PF_Value_Rx_65265", "nan", "True", "100", "0");
+    // dbManager.insertRecord("vig", "Main", "65265", "CCVS1_PGN65265_SHM_Rx", "SDM_Data_CRC_Rx_65265", "nan", "True", "100", "0");
+    // dbManager.insertRecord("vig", "Main", "65269", "AMB_PGN65269", "Amb_AirT", "1.427", "False", "1000", "25");
+    // dbManager.insertRecord("vig", "Main", "65269", "AMB_PGN65269", "Barometric_P", "1.427", "False", "1000", "30");
+    // dbManager.insertRecord("vig", "Main", "65269", "AMB_PGN65269", "Cab_InteriorT", "1.427", "False", "1000", "30");
+    // dbManager.insertRecord("vig", "Main", "65269", "AMB_PGN65269", "Eng_Intk1AirT", "1.427", "False", "1000", "30");
+    // dbManager.insertRecord("vig", "Main", "65269", "AMB_PGN65269", "Road_SurfT", "1.427", "False", "1000", "30");
+    // dbManager.insertRecord("vig", "Main", "65269", "AMB_PGN65269_SHM_Rx", "Inv_SDM_Data_Pg_Rx_65269", "nan", "True", "1000", "1");
+    // dbManager.insertRecord("vig", "Main", "65269", "AMB_PGN65269_SHM_Rx", "Inv_SDM_E_Data_Pg_Rx_65269", "nan", "True", "1000", "1");
+    // dbManager.insertRecord("vig", "Main", "65269", "AMB_PGN65269_SHM_Rx", "SHM_Reserved_Rx_65269", "nan", "True", "1000", "1");
+    // dbManager.insertRecord("vig", "Main", "65269", "AMB_PGN65269_SHM_Rx", "Sequence_Number_Rx_65269", "nan", "True", "1000", "13");
+    // dbManager.insertRecord("vig", "Main", "65269", "AMB_PGN65269_SHM_Rx", "Inv_SDM_SA_Rx_65269", "nan", "True", "1000", "0");
+    // dbManager.insertRecord("vig", "Main", "65269", "AMB_PGN65269_SHM_Rx", "Inv_SDM_PS_Value_Rx_65269", "nan", "True", "1000", "0");
+    // dbManager.insertRecord("vig", "Main", "65269", "AMB_PGN65269_SHM_Rx", "Inv_SDM_PF_Value_Rx_65269", "nan", "True", "1000", "0");
+    // dbManager.insertRecord("vig", "Main", "65269", "AMB_PGN65269_SHM_Rx", "SDM_Data_CRC_Rx_65269", "nan", "True", "1000", "0");
+    // dbManager.insertRecord("vig", "nonshm", "61184", "PropA_C4_PGN61184", "ITMSLimVeh", "nan", "False", "20", "4095");
+    // dbManager.insertRecord("vig", "nonshm", "61184", "PropA_C4_PGN61184", "TMS_Active_Discharge", "nan", "False", "20", "3");
+    // dbManager.insertRecord("vig", "nonshm", "59904", "RQST_ES_PGN59904_Rx1", "RQST_Rx1", "nan", "False", "5000", "64606");
 
-    // dbManager.insertRecord("nonshm", "7", "HC1_Demands_3", "Torque_Request", "nan", "False", "20", "100");
-    // dbManager.insertRecord("nonshm", "7", "HC1_Demands_3", "ControlWord", "nan", "False", "20", "5"); //may be we have to set 3 first and then 5 energise followed by enable
-    // dbManager.insertRecord("nonshm", "7", "HC1_Demands_3", "Torque_Traction_Limit", "nan", "False", "20", "10");
-    // dbManager.insertRecord("nonshm", "7", "HC1_Demands_3", "SEQ_Command1", "nan", "False", "20", "0");
-    // dbManager.insertRecord("nonshm", "7", "HC1_Demands_3", "CS_Command1", "nan", "False", "20", "0");
-    // dbManager.insertRecord("nonshm", "8", "HC2_Demands_3", "Torque_Regen_Limit", "nan", "False", "20", "-10");
-    // dbManager.insertRecord("nonshm", "8", "HC2_Demands_3", "Speed_Limit_Forward", "nan", "False", "20", "100");
-    // dbManager.insertRecord("nonshm", "8", "HC2_Demands_3", "Speed_Limit_Reverse", "nan", "False", "20", "-100"); // we have to handle signed data properly for hvlp alone
-    // dbManager.insertRecord("nonshm", "8", "HC2_Demands_3", "SEQ_Command2", "nan", "False", "20", "0");
-    // dbManager.insertRecord("nonshm", "8", "HC2_Demands_3", "CS_Command2", "nan", "False", "20", "0");
-    // dbManager.insertRecord("nonshm", "9", "HC3_Battery_Demands_3", "DC_Link_Imax_Discharge", "nan", "False", "20", "10");
-    // dbManager.insertRecord("nonshm", "9", "HC3_Battery_Demands_3", "DC_Link_Imax_Recharge", "nan", "False", "20", "-5");
-    // dbManager.insertRecord("nonshm", "9", "HC3_Battery_Demands_3", "DC_Link_Voltage_Target", "nan", "False", "20", "0");
-    // dbManager.insertRecord("nonshm", "9", "HC3_Battery_Demands_3", "SEQ_CurrentLimits", "nan", "False", "20", "0");
-    // dbManager.insertRecord("nonshm", "9", "HC3_Battery_Demands_3", "CS_CurrentLimits", "nan", "False", "20", "0");
+    // below are for on board charger
 
-
-    // dbManager.insertRecord("nonshm", "10", "HC1_Demands_4", "Torque_Request", "nan", "False", "20", "100");
-    // dbManager.insertRecord("nonshm", "10", "HC1_Demands_4", "ControlWord", "nan", "False", "20", "5"); //may be we have to set 3 first and then 5 energise followed by enable
-    // dbManager.insertRecord("nonshm", "10", "HC1_Demands_4", "Torque_Traction_Limit", "nan", "False", "20", "10");
-    // dbManager.insertRecord("nonshm", "10", "HC1_Demands_4", "SEQ_Command1", "nan", "False", "20", "0");
-    // dbManager.insertRecord("nonshm", "10", "HC1_Demands_4", "CS_Command1", "nan", "False", "20", "0");
-    // dbManager.insertRecord("nonshm", "11", "HC2_Demands_4", "Torque_Regen_Limit", "nan", "False", "20", "100");
-    // dbManager.insertRecord("nonshm", "11", "HC2_Demands_4", "Speed_Limit_Forward", "nan", "False", "20", "100");
-    // dbManager.insertRecord("nonshm", "11", "HC2_Demands_4", "Speed_Limit_Reverse", "nan", "False", "20", "-100"); // we have to handle signed data properly for hvlp alone
-    // dbManager.insertRecord("nonshm", "11", "HC2_Demands_4", "SEQ_Command2", "nan", "False", "20", "0");
-    // dbManager.insertRecord("nonshm", "11", "HC2_Demands_4", "CS_Command2", "nan", "False", "20", "0");
-    // dbManager.insertRecord("nonshm", "12", "HC3_Battery_Demands_4", "DC_Link_Imax_Discharge", "nan", "False", "20", "10");
-    // dbManager.insertRecord("nonshm", "12", "HC3_Battery_Demands_4", "DC_Link_Imax_Recharge", "nan", "False", "20", "-5");
-    // dbManager.insertRecord("nonshm", "12", "HC3_Battery_Demands_4", "DC_Link_Voltage_Target", "nan", "False", "20", "0");
-    // dbManager.insertRecord("nonshm", "12", "HC3_Battery_Demands_4", "SEQ_CurrentLimits", "nan", "False", "20", "0");
-    // dbManager.insertRecord("nonshm", "12", "HC3_Battery_Demands_4", "CS_CurrentLimits", "nan", "False", "20", "0");
-
-    // editron inverter migration -- migration done
-    // dbManager.insertRecord("nonshm", "65312", "CMD_MOT_0", "cmd_mot_request", "nan", "False", "100", "1");
-    // dbManager.insertRecord("nonshm", "65313", "CMD_MOT_1", "cmd_mot_ctrl_mode", "nan", "False", "10", "0"); //speed mode
-    // dbManager.insertRecord("nonshm", "65313", "CMD_MOT_1", "cmd_mot_run", "nan", "False", "10", "1"); //set to run mode
-    // dbManager.insertRecord("nonshm", "65314", "CMD_MOT_2", "cmd_mot_n_ref", "nan", "False", "100", "100"); // only this matters
-    // dbManager.insertRecord("nonshm", "65314", "CMD_MOT_2", "cmd_mot_t_ref", "nan", "False", "100", "0");
-    // dbManager.insertRecord("nonshm", "65314", "CMD_MOT_2", "cmd_mot_u_dc_ref", "nan", "False", "100", "0");
-    // dbManager.insertRecord("nonshm", "65314", "CMD_MOT_2", "cmd_mot_p_ref", "nan", "False", "100", "0");
-    // dbManager.insertRecord("nonshm", "65315", "CMD_MOT_3", "cmd_mot_f_ref", "nan", "False", "100", "10");  //not sure about the value
-    // dbManager.insertRecord("nonshm", "65315", "CMD_MOT_3", "cmd_mot_pos_ref_frac", "nan", "False", "100", "10"); //not sure about the value
-    // dbManager.insertRecord("nonshm", "65315", "CMD_MOT_3", "cmd_mot_pos_ref_full", "nan", "False", "100", "10"); //not sure about the value
-    // dbManager.insertRecord("nonshm", "65316", "CMD_MOT_4", "cmd_mot_lim_n_max", "nan", "False", "100", "100"); // only this matters
-    // dbManager.insertRecord("nonshm", "65316", "CMD_MOT_4", "cmd_mot_lim_n_min", "nan", "False", "100", "-100");
-    // dbManager.insertRecord("nonshm", "65316", "CMD_MOT_4", "cmd_mot_lim_t_max", "nan", "False", "100", "100");
-    // dbManager.insertRecord("nonshm", "65316", "CMD_MOT_4", "cmd_mot_lim_t_min", "nan", "False", "100", "-100");
-    // dbManager.insertRecord("nonshm", "65317", "CMD_MOT_5", "cmd_mot_lim_u_dc_ovc_limit", "nan", "False", "100", "100"); //check the communication document for more info
-    // dbManager.insertRecord("nonshm", "65317", "CMD_MOT_5", "cmd_mot_lim_u_dc_ovc_begin", "nan", "False", "100", "80");
-    // dbManager.insertRecord("nonshm", "65317", "CMD_MOT_5", "cmd_mot_lim_u_dc_uvc_begin", "nan", "False", "100", "15");
-    // dbManager.insertRecord("nonshm", "65317", "CMD_MOT_5", "cmd_mot_lim_u_dc_uvc_limit", "nan", "False", "100", "10");
-    // dbManager.insertRecord("nonshm", "65318", "CMD_MOT_6", "cmd_mot_lim_p_max", "nan", "False", "100", "1000"); //check the communication document for more info
-    // dbManager.insertRecord("nonshm", "65318", "CMD_MOT_6", "cmd_mot_lim_p_min", "nan", "False", "100", "800");
-    // dbManager.insertRecord("nonshm", "65318", "CMD_MOT_6", "cmd_mot_lim_i_dc_max", "nan", "False", "100", "20");
-    // dbManager.insertRecord("nonshm", "65318", "CMD_MOT_6", "cmd_mot_lim_i_dc_min", "nan", "False", "100", "10");
-    // dbManager.insertRecord("nonshm", "65319", "CMD_MOT_7", "cmd_mot_speed_control_kp", "nan", "False", "100", "20"); // idk the gain value we have to check this -- kp control gain
-    // dbManager.insertRecord("nonshm", "65319", "CMD_MOT_7", "cmd_mot_speed_control_ti", "nan", "False", "100", "20");
-    // dbManager.insertRecord("nonshm", "65319", "CMD_MOT_7", "cmd_mot_speed_ref_ramp_time", "nan", "False", "100", "10");
-    // dbManager.insertRecord("nonshm", "65320", "CMD_MOT_8", "cmd_mot_torque_rate_gen_side", "nan", "False", "100", "30");
-    // dbManager.insertRecord("nonshm", "65320", "CMD_MOT_8", "cmd_mot_torque_rate_mot_side", "nan", "False", "100", "30");
-    // dbManager.insertRecord("nonshm", "65321", "CMD_MOT_9", "cmd_mot_enable_resolver_commands", "nan", "False", "1000", "1");
-    // dbManager.insertRecord("nonshm", "65321", "CMD_MOT_9", "cmd_mot_resolver_id_request", "nan", "False", "1000", "1");
-    // dbManager.insertRecord("nonshm", "65321", "CMD_MOT_9", "cmd_mot_enable_resolver_feedback", "nan", "False", "1000", "1");
-    // dbManager.insertRecord("nonshm", "65321", "CMD_MOT_9", "cmd_mot_save_resolver_parameters", "nan", "False", "1000", "0");
-    // dbManager.insertRecord("nonshm", "65321", "CMD_MOT_9", "cmd_mot_resolver_id_method", "nan", "False", "1000", "0");
-    // dbManager.insertRecord("nonshm", "65321", "CMD_MOT_9", "cmd_mot_resolver_offset", "nan", "False", "1000", "0");
-    // dbManager.insertRecord("nonshm", "65299", "CMD_SYS_0", "cmd_sys_request", "nan", "False", "100", "0");
-    // dbManager.insertRecord("nonshm", "65297", "CMD_SYS_1", "cmd_sys_fault_reset", "nan", "False", "10", "1");
-    // dbManager.insertRecord("nonshm", "65297", "CMD_SYS_1", "cmd_sys_contactor", "nan", "False", "10", "0");
-    // dbManager.insertRecord("nonshm", "65297", "CMD_SYS_1", "cmd_sys_control_switch", "nan", "False", "10", "0");
-    // dbManager.insertRecord("nonshm", "65298", "CMD_SYS_2", "cmd_sys_digital_output_1", "nan", "False", "100", "0");
-    // dbManager.insertRecord("nonshm", "65298", "CMD_SYS_2", "cmd_sys_digital_output_2", "nan", "False", "100", "0");
-    // dbManager.insertRecord("nonshm", "65298", "CMD_SYS_2", "cmd_sys_digital_output_3", "nan", "False", "100", "0");
-    // dbManager.insertRecord("nonshm", "65298", "CMD_SYS_2", "cmd_sys_digital_output_4", "nan", "False", "100", "0");
-    // dbManager.insertRecord("nonshm", "65298", "CMD_SYS_2", "cmd_sys_digital_output_5", "nan", "False", "100", "0");
+    // dbManager.insertRecord("obc", "nonshm", "600", "VCU", "VCU_DCDC_Command", "nan", "False", "200", "0");
+    // dbManager.insertRecord("obc", "nonshm", "600", "VCU", "VCU_DCDC_SetV", "nan", "False", "200", "14");
+    // dbManager.insertRecord("obc", "nonshm", "600", "VCU", "VCU_DCDC_MaxI", "nan", "False", "200", "10");
+    // dbManager.insertRecord("obc", "nonshm", "0", "BMS", "BMS_Max_Voltage", "nan", "False", "1000", "300");
+    // dbManager.insertRecord("obc", "nonshm", "0", "BMS", "BMS_Max_Current", "nan", "False", "1000", "60");
+    // dbManager.insertRecord("obc", "nonshm", "0", "BMS", "BMS_Mode", "nan", "False", "1000", "0");
+    // dbManager.insertRecord("obc", "nonshm", "0", "BMS", "BMS_Control", "nan", "False", "1000", "0");
 
     //migration of epec pdu data
-    // dbManager.insertRecord("nonshm", "65296", "PDU_Rx_1", "Close_GroupA_Contactors", "nan", "False", "100", "1");
-    // dbManager.insertRecord("nonshm", "65296", "PDU_Rx_1", "Close_GroupB_Contactors", "nan", "False", "100", "1");
-    // dbManager.insertRecord("nonshm", "65296", "PDU_Rx_1", "Disconnect_Rins_Meas", "nan", "False", "100", "0");
-    // dbManager.insertRecord("nonshm", "65296", "PDU_Rx_1", "Reset_Faults", "nan", "False", "100", "1");
+
+    // dbManager.insertRecord("pdu", "nonshm", "65296", "PDU_Rx_1", "Close_GroupA_Contactors", "nan", "False", "100", "1");
+    // dbManager.insertRecord("pdu", "nonshm", "65296", "PDU_Rx_1", "Close_GroupB_Contactors", "nan", "False", "100", "1");
+    // dbManager.insertRecord("pdu", "nonshm", "65296", "PDU_Rx_1", "Disconnect_Rins_Meas", "nan", "False", "100", "0");
+    // dbManager.insertRecord("pdu", "nonshm", "65296", "PDU_Rx_1", "Reset_Faults", "nan", "False", "100", "1");
+
+    //hvlp inverter migration --> set to torque mode
+
+    // dbManager.insertRecord("hvlp1", "nonshm", "1", "HC1_Demands", "Torque_Request", "nan", "False", "20", "100");
+    // dbManager.insertRecord("hvlp1", "nonshm", "1", "HC1_Demands", "ControlWord", "nan", "False", "20", "5"); //transition from 6->3->5 when connected for driving only
+    // dbManager.insertRecord("hvlp1", "nonshm", "1", "HC1_Demands", "Torque_Traction_Limit", "nan", "False", "20", "10");
+    // dbManager.insertRecord("hvlp1", "nonshm", "1", "HC1_Demands", "SEQ_Command1", "nan", "False", "20", "0");
+    // dbManager.insertRecord("hvlp1", "nonshm", "1", "HC1_Demands", "CS_Command1", "nan", "False", "20", "0");
+    // dbManager.insertRecord("hvlp1", "nonshm", "2", "HC2_Demands", "Torque_Regen_Limit", "nan", "False", "20", "-10");
+    // dbManager.insertRecord("hvlp1", "nonshm", "2", "HC2_Demands", "Speed_Limit_Forward", "nan", "False", "20", "100");
+    // dbManager.insertRecord("hvlp1", "nonshm", "2", "HC2_Demands", "Speed_Limit_Reverse", "nan", "False", "20", "-100"); // we have to handle signed data properly for hvlp alone
+    // dbManager.insertRecord("hvlp1", "nonshm", "2", "HC2_Demands", "SEQ_Command2", "nan", "False", "20", "0");
+    // dbManager.insertRecord("hvlp1", "nonshm", "2", "HC2_Demands", "CS_Command2", "nan", "False", "20", "0");
+    // dbManager.insertRecord("hvlp1", "nonshm", "3", "HC3_Battery_Demands", "DC_Link_Imax_Discharge", "nan", "False", "20", "10");
+    // dbManager.insertRecord("hvlp1", "nonshm", "3", "HC3_Battery_Demands", "DC_Link_Imax_Recharge", "nan", "False", "20", "-5");
+    // dbManager.insertRecord("hvlp1", "nonshm", "3", "HC3_Battery_Demands", "DC_Link_Voltage_Target", "nan", "False", "20", "0");
+    // dbManager.insertRecord("hvlp1", "nonshm", "3", "HC3_Battery_Demands", "SEQ_CurrentLimits", "nan", "False", "20", "0");
+    // dbManager.insertRecord("hvlp1", "nonshm", "3", "HC3_Battery_Demands", "CS_CurrentLimits", "nan", "False", "20", "0");
+
+    // dbManager.insertRecord("hvlp2", "nonshm", "4", "HC1_Demands_2", "Torque_Request", "nan", "False", "20", "100");
+    // dbManager.insertRecord("hvlp2", "nonshm", "4", "HC1_Demands_2", "ControlWord", "nan", "False", "20", "5"); //may be we have to set 3 first and then 5 energise followed by enable
+    // dbManager.insertRecord("hvlp2", "nonshm", "4", "HC1_Demands_2", "Torque_Traction_Limit", "nan", "False", "20", "10");
+    // dbManager.insertRecord("hvlp2", "nonshm", "4", "HC1_Demands_2", "SEQ_Command1", "nan", "False", "20", "0");
+    // dbManager.insertRecord("hvlp2", "nonshm", "4", "HC1_Demands_2", "CS_Command1", "nan", "False", "20", "0");
+    // dbManager.insertRecord("hvlp2", "nonshm", "5", "HC2_Demands_2", "Torque_Regen_Limit", "nan", "False", "20", "-10");
+    // dbManager.insertRecord("hvlp2", "nonshm", "5", "HC2_Demands_2", "Speed_Limit_Forward", "nan", "False", "20", "100");
+    // dbManager.insertRecord("hvlp2", "nonshm", "5", "HC2_Demands_2", "Speed_Limit_Reverse", "nan", "False", "20", "-100"); // we have to handle signed data properly for hvlp alone
+    // dbManager.insertRecord("hvlp2", "nonshm", "5", "HC2_Demands_2", "SEQ_Command2", "nan", "False", "20", "0");
+    // dbManager.insertRecord("hvlp2", "nonshm", "5", "HC2_Demands_2", "CS_Command2", "nan", "False", "20", "0");
+    // dbManager.insertRecord("hvlp2", "nonshm", "6", "HC3_Battery_Demands_2", "DC_Link_Imax_Discharge", "nan", "False", "20", "10");
+    // dbManager.insertRecord("hvlp2", "nonshm", "6", "HC3_Battery_Demands_2", "DC_Link_Imax_Recharge", "nan", "False", "20", "-5");
+    // dbManager.insertRecord("hvlp2", "nonshm", "6", "HC3_Battery_Demands_2", "DC_Link_Voltage_Target", "nan", "False", "20", "0");
+    // dbManager.insertRecord("hvlp2", "nonshm", "6", "HC3_Battery_Demands_2", "SEQ_CurrentLimits", "nan", "False", "20", "0");
+    // dbManager.insertRecord("hvlp2", "nonshm", "6", "HC3_Battery_Demands_2", "CS_CurrentLimits", "nan", "False", "20", "0");
+
+    // dbManager.insertRecord("hvlp3", "nonshm", "7", "HC1_Demands_3", "Torque_Request", "nan", "False", "20", "100");
+    // dbManager.insertRecord("hvlp3", "nonshm", "7", "HC1_Demands_3", "ControlWord", "nan", "False", "20", "5"); //may be we have to set 3 first and then 5 energise followed by enable
+    // dbManager.insertRecord("hvlp3", "nonshm", "7", "HC1_Demands_3", "Torque_Traction_Limit", "nan", "False", "20", "10");
+    // dbManager.insertRecord("hvlp3", "nonshm", "7", "HC1_Demands_3", "SEQ_Command1", "nan", "False", "20", "0");
+    // dbManager.insertRecord("hvlp3", "nonshm", "7", "HC1_Demands_3", "CS_Command1", "nan", "False", "20", "0");
+    // dbManager.insertRecord("hvlp3", "nonshm", "8", "HC2_Demands_3", "Torque_Regen_Limit", "nan", "False", "20", "-10");
+    // dbManager.insertRecord("hvlp3", "nonshm", "8", "HC2_Demands_3", "Speed_Limit_Forward", "nan", "False", "20", "100");
+    // dbManager.insertRecord("hvlp3", "nonshm", "8", "HC2_Demands_3", "Speed_Limit_Reverse", "nan", "False", "20", "-100"); // we have to handle signed data properly for hvlp alone
+    // dbManager.insertRecord("hvlp3", "nonshm", "8", "HC2_Demands_3", "SEQ_Command2", "nan", "False", "20", "0");
+    // dbManager.insertRecord("hvlp3", "nonshm", "8", "HC2_Demands_3", "CS_Command2", "nan", "False", "20", "0");
+    // dbManager.insertRecord("hvlp3", "nonshm", "9", "HC3_Battery_Demands_3", "DC_Link_Imax_Discharge", "nan", "False", "20", "10");
+    // dbManager.insertRecord("hvlp3", "nonshm", "9", "HC3_Battery_Demands_3", "DC_Link_Imax_Recharge", "nan", "False", "20", "-5");
+    // dbManager.insertRecord("hvlp3", "nonshm", "9", "HC3_Battery_Demands_3", "DC_Link_Voltage_Target", "nan", "False", "20", "0");
+    // dbManager.insertRecord("hvlp3", "nonshm", "9", "HC3_Battery_Demands_3", "SEQ_CurrentLimits", "nan", "False", "20", "0");
+    // dbManager.insertRecord("hvlp3", "nonshm", "9", "HC3_Battery_Demands_3", "CS_CurrentLimits", "nan", "False", "20", "0");
 
 
-    // import ambient air temperature messages to be sent to the VIG
-    // dbManager.insertRecord("Main", "65269", "AMB_PGN65269", "Amb_AirT", "1.427", "False", "1000", "25");
-    // dbManager.insertRecord("Main", "65269", "AMB_PGN65269", "Barometric_P", "1.427", "False", "1000", "30");
-    // dbManager.insertRecord("Main", "65269", "AMB_PGN65269", "Cab_InteriorT", "1.427", "False", "1000", "30");
-    // dbManager.insertRecord("Main", "65269", "AMB_PGN65269", "Eng_Intk1AirT", "1.427", "False", "1000", "30");
-    // dbManager.insertRecord("Main", "65269", "AMB_PGN65269", "Road_SurfT", "1.427", "False", "1000", "30");
+    // dbManager.insertRecord("hvlp4", "nonshm", "10", "HC1_Demands_4", "Torque_Request", "nan", "False", "20", "100");
+    // dbManager.insertRecord("hvlp4", "nonshm", "10", "HC1_Demands_4", "ControlWord", "nan", "False", "20", "5"); //may be we have to set 3 first and then 5 energise followed by enable
+    // dbManager.insertRecord("hvlp4", "nonshm", "10", "HC1_Demands_4", "Torque_Traction_Limit", "nan", "False", "20", "10");
+    // dbManager.insertRecord("hvlp4", "nonshm", "10", "HC1_Demands_4", "SEQ_Command1", "nan", "False", "20", "0");
+    // dbManager.insertRecord("hvlp4", "nonshm", "10", "HC1_Demands_4", "CS_Command1", "nan", "False", "20", "0");
+    // dbManager.insertRecord("hvlp4", "nonshm", "11", "HC2_Demands_4", "Torque_Regen_Limit", "nan", "False", "20", "100");
+    // dbManager.insertRecord("hvlp4", "nonshm", "11", "HC2_Demands_4", "Speed_Limit_Forward", "nan", "False", "20", "100");
+    // dbManager.insertRecord("hvlp4", "nonshm", "11", "HC2_Demands_4", "Speed_Limit_Reverse", "nan", "False", "20", "-100"); // we have to handle signed data properly for hvlp alone
+    // dbManager.insertRecord("hvlp4", "nonshm", "11", "HC2_Demands_4", "SEQ_Command2", "nan", "False", "20", "0");
+    // dbManager.insertRecord("hvlp4", "nonshm", "11", "HC2_Demands_4", "CS_Command2", "nan", "False", "20", "0");
+    // dbManager.insertRecord("hvlp4", "nonshm", "12", "HC3_Battery_Demands_4", "DC_Link_Imax_Discharge", "nan", "False", "20", "10");
+    // dbManager.insertRecord("hvlp4", "nonshm", "12", "HC3_Battery_Demands_4", "DC_Link_Imax_Recharge", "nan", "False", "20", "-5");
+    // dbManager.insertRecord("hvlp4", "nonshm", "12", "HC3_Battery_Demands_4", "DC_Link_Voltage_Target", "nan", "False", "20", "0");
+    // dbManager.insertRecord("hvlp4", "nonshm", "12", "HC3_Battery_Demands_4", "SEQ_CurrentLimits", "nan", "False", "20", "0");
+    // dbManager.insertRecord("hvlp4", "nonshm", "12", "HC3_Battery_Demands_4", "CS_CurrentLimits", "nan", "False", "20", "0");
 
-    // dbManager.insertRecord("Main", "65269", "AMB_PGN65269_SHM_Rx", "Inv_SDM_Data_Pg_Rx_65269", "nan", "True", "1000", "1");
-    // dbManager.insertRecord("Main", "65269", "AMB_PGN65269_SHM_Rx", "Inv_SDM_E_Data_Pg_Rx_65269", "nan", "True", "1000", "1");
-    // dbManager.insertRecord("Main", "65269", "AMB_PGN65269_SHM_Rx", "SHM_Reserved_Rx_65269", "nan", "True", "1000", "1");
-    // dbManager.insertRecord("Main", "65269", "AMB_PGN65269_SHM_Rx", "Sequence_Number_Rx_65269", "nan", "True", "1000", "13");
-    // dbManager.insertRecord("Main", "65269", "AMB_PGN65269_SHM_Rx", "Inv_SDM_SA_Rx_65269", "nan", "True", "1000", "0");
-    // dbManager.insertRecord("Main", "65269", "AMB_PGN65269_SHM_Rx", "Inv_SDM_PS_Value_Rx_65269", "nan", "True", "1000", "0");
-    // dbManager.insertRecord("Main", "65269", "AMB_PGN65269_SHM_Rx", "Inv_SDM_PF_Value_Rx_65269", "nan", "True", "1000", "0");
-    // dbManager.insertRecord("Main", "65269", "AMB_PGN65269_SHM_Rx", "SDM_Data_CRC_Rx_65269", "nan", "True", "1000", "0");
+    // editron inverter migration -- migration done
 
+    // dbManager.insertRecord("editron", "nonshm", "65312", "CMD_MOT_0", "cmd_mot_request", "nan", "False", "100", "1");
+    // dbManager.insertRecord("editron", "nonshm", "65313", "CMD_MOT_1", "cmd_mot_ctrl_mode", "nan", "False", "10", "0"); //speed mode
+    // dbManager.insertRecord("editron", "nonshm", "65313", "CMD_MOT_1", "cmd_mot_run", "nan", "False", "10", "1"); //set to run mode
+    // dbManager.insertRecord("editron", "nonshm", "65314", "CMD_MOT_2", "cmd_mot_n_ref", "nan", "False", "100", "100"); // only this matters
+    // dbManager.insertRecord("editron", "nonshm", "65314", "CMD_MOT_2", "cmd_mot_t_ref", "nan", "False", "100", "0");
+    // dbManager.insertRecord("editron", "nonshm", "65314", "CMD_MOT_2", "cmd_mot_u_dc_ref", "nan", "False", "100", "0");
+    // dbManager.insertRecord("editron", "nonshm", "65314", "CMD_MOT_2", "cmd_mot_p_ref", "nan", "False", "100", "0");
+    // dbManager.insertRecord("editron", "nonshm", "65315", "CMD_MOT_3", "cmd_mot_f_ref", "nan", "False", "100", "10");  //not sure about the value
+    // dbManager.insertRecord("editron", "nonshm", "65315", "CMD_MOT_3", "cmd_mot_pos_ref_frac", "nan", "False", "100", "10"); //not sure about the value
+    // dbManager.insertRecord("editron", "nonshm", "65315", "CMD_MOT_3", "cmd_mot_pos_ref_full", "nan", "False", "100", "10"); //not sure about the value
+    // dbManager.insertRecord("editron", "nonshm", "65316", "CMD_MOT_4", "cmd_mot_lim_n_max", "nan", "False", "100", "100"); // only this matters
+    // dbManager.insertRecord("editron", "nonshm", "65316", "CMD_MOT_4", "cmd_mot_lim_n_min", "nan", "False", "100", "-100");
+    // dbManager.insertRecord("editron", "nonshm", "65316", "CMD_MOT_4", "cmd_mot_lim_t_max", "nan", "False", "100", "100");
+    // dbManager.insertRecord("editron", "nonshm", "65316", "CMD_MOT_4", "cmd_mot_lim_t_min", "nan", "False", "100", "-100");
+    // dbManager.insertRecord("editron", "nonshm", "65317", "CMD_MOT_5", "cmd_mot_lim_u_dc_ovc_limit", "nan", "False", "100", "100"); //check the communication document for more info
+    // dbManager.insertRecord("editron", "nonshm", "65317", "CMD_MOT_5", "cmd_mot_lim_u_dc_ovc_begin", "nan", "False", "100", "80");
+    // dbManager.insertRecord("editron", "nonshm", "65317", "CMD_MOT_5", "cmd_mot_lim_u_dc_uvc_begin", "nan", "False", "100", "15");
+    // dbManager.insertRecord("editron", "nonshm", "65317", "CMD_MOT_5", "cmd_mot_lim_u_dc_uvc_limit", "nan", "False", "100", "10");
+    // dbManager.insertRecord("editron", "nonshm", "65318", "CMD_MOT_6", "cmd_mot_lim_p_max", "nan", "False", "100", "1000"); //check the communication document for more info
+    // dbManager.insertRecord("editron", "nonshm", "65318", "CMD_MOT_6", "cmd_mot_lim_p_min", "nan", "False", "100", "800");
+    // dbManager.insertRecord("editron", "nonshm", "65318", "CMD_MOT_6", "cmd_mot_lim_i_dc_max", "nan", "False", "100", "20");
+    // dbManager.insertRecord("editron", "nonshm", "65318", "CMD_MOT_6", "cmd_mot_lim_i_dc_min", "nan", "False", "100", "10");
+    // dbManager.insertRecord("editron", "nonshm", "65319", "CMD_MOT_7", "cmd_mot_speed_control_kp", "nan", "False", "100", "20"); // idk the gain value we have to check this -- kp control gain
+    // dbManager.insertRecord("editron", "nonshm", "65319", "CMD_MOT_7", "cmd_mot_speed_control_ti", "nan", "False", "100", "20");
+    // dbManager.insertRecord("editron", "nonshm", "65319", "CMD_MOT_7", "cmd_mot_speed_ref_ramp_time", "nan", "False", "100", "10");
+    // dbManager.insertRecord("editron", "nonshm", "65320", "CMD_MOT_8", "cmd_mot_torque_rate_gen_side", "nan", "False", "100", "30");
+    // dbManager.insertRecord("editron", "nonshm", "65320", "CMD_MOT_8", "cmd_mot_torque_rate_mot_side", "nan", "False", "100", "30");
+    // dbManager.insertRecord("editron", "nonshm", "65321", "CMD_MOT_9", "cmd_mot_enable_resolver_commands", "nan", "False", "1000", "1");
+    // dbManager.insertRecord("editron", "nonshm", "65321", "CMD_MOT_9", "cmd_mot_resolver_id_request", "nan", "False", "1000", "1");
+    // dbManager.insertRecord("editron", "nonshm", "65321", "CMD_MOT_9", "cmd_mot_enable_resolver_feedback", "nan", "False", "1000", "1");
+    // dbManager.insertRecord("editron", "nonshm", "65321", "CMD_MOT_9", "cmd_mot_save_resolver_parameters", "nan", "False", "1000", "0");
+    // dbManager.insertRecord("editron", "nonshm", "65321", "CMD_MOT_9", "cmd_mot_resolver_id_method", "nan", "False", "1000", "0");
+    // dbManager.insertRecord("editron", "nonshm", "65321", "CMD_MOT_9", "cmd_mot_resolver_offset", "nan", "False", "1000", "0");
+    // dbManager.insertRecord("editron", "nonshm", "65299", "CMD_SYS_0", "cmd_sys_request", "nan", "False", "100", "0");
+    // dbManager.insertRecord("editron", "nonshm", "65297", "CMD_SYS_1", "cmd_sys_fault_reset", "nan", "False", "10", "1");
+    // dbManager.insertRecord("editron", "nonshm", "65297", "CMD_SYS_1", "cmd_sys_contactor", "nan", "False", "10", "0");
+    // dbManager.insertRecord("editron", "nonshm", "65297", "CMD_SYS_1", "cmd_sys_control_switch", "nan", "False", "10", "0");
+    // dbManager.insertRecord("editron", "nonshm", "65298", "CMD_SYS_2", "cmd_sys_digital_output_1", "nan", "False", "100", "0");
+    // dbManager.insertRecord("editron", "nonshm", "65298", "CMD_SYS_2", "cmd_sys_digital_output_2", "nan", "False", "100", "0");
+    // dbManager.insertRecord("editron", "nonshm", "65298", "CMD_SYS_2", "cmd_sys_digital_output_3", "nan", "False", "100", "0");
+    // dbManager.insertRecord("editron", "nonshm", "65298", "CMD_SYS_2", "cmd_sys_digital_output_4", "nan", "False", "100", "0");
+    // dbManager.insertRecord("editron", "nonshm", "65298", "CMD_SYS_2", "cmd_sys_digital_output_5", "nan", "False", "100", "0");
 
-    //sending themral management system data to the ecu
-    // dbManager.insertRecord("nonshm", "61184", "PropA_C4_PGN61184", "ITMSLimVeh", "nan", "False", "20", "4095");
-    // dbManager.insertRecord("nonshm", "61184", "PropA_C4_PGN61184", "TMS_Active_Discharge", "nan", "False", "20", "3");
-    //request pgn -- 64606 pgn state of charge
-     // dbManager.insertRecord("nonshm", "59904", "RQST_ES_PGN59904_Rx1", "RQST_Rx1", "nan", "False", "5000", "64606");
 
 
     // Delete a record by condition
@@ -1074,6 +1149,7 @@ int main(int argc, char *argv[]) {
     // Iterate through the rows in the model
     for (int row = 0; row < model->rowCount(); ++row) {
         QString sheetName = model->index(row, model->record().indexOf("SheetName")).data().toString();
+        QString nodeName =  model->index(row, model->record().indexOf("NodeName")).data().toString();
         if (sheetName != "Main" && sheetName != "nonshm") {
             continue; // Skip rows not belonging to the specified sheets
         }
@@ -1117,6 +1193,8 @@ int main(int argc, char *argv[]) {
             messages[pgn].SDM.emplace_back(value, cycleTime, deltaTime, signal, messageName);
         }
         messages[pgn].sheetName = sheetName.toStdString();
+        messages[pgn].nodeName = nodeName.toStdString();
+
     }
     // printModelData(model);
     // Output results for debugging
@@ -1127,6 +1205,7 @@ int main(int argc, char *argv[]) {
         qDebug() << "----------------------------------------";
         qDebug() << "PGN:" << pgn;
         qDebug() << "Sheet Name:" << QString::fromStdString(message.sheetName);
+        qDebug() << "Node Name:" << QString::fromStdString(message.nodeName);
 
         qDebug() << "\nSHM Entries:";
         if (message.SHM.empty()) {
@@ -1185,12 +1264,29 @@ int main(int argc, char *argv[]) {
     }
     TimeDateResponder responder(fileParser,nonMainMessages);
     responder.initialize(); // Replace with your CAN interface name
+
+
+
+    //fix to split the messages based on nodename column and spawn the new thread after splitting
+    // group 1:  vig, pdu, obc -- power data together as they are time specific
+    // group 2:  hvlp1, hvlp2, hvlp3, hvlp4, editron -- basically all inverter data together
+    std::vector<std::string> group1 = {"vig", "pdu", "obc"};
+    std::vector<std::string> group2 = {"hvlp1", "hvlp2", "hvlp3", "hvlp4", "editron"};
+
+    std::unordered_map<std::string, Message> group1Messages;
+    std::unordered_map<std::string, Message> group2Messages;
+
+    splitMessagesByNodeName(messages, group1, group2, group1Messages, group2Messages);
+
     // Initialize the CanMessageSender thread
-    CanMessageSender sender(fileParser, messages);
-    sender.start();  // This starts the thread
+    CanMessageSenderGroup1 senderGroup1(fileParser, group1Messages); // main thread handling logic flow
+    senderGroup1.start();  // This starts the thread
 
+    //below thread sends group2 message data -- if you change logic in the above thread make sure to revisit here
+    CanMessageSenderGroup2 senderGroup2(fileParser, group2Messages); // main thread handling logic flow
+    senderGroup2.start();  // This starts the thread
 
-
+    //todo: replace below implementation with fsm
     dataVec[0].pgn = 0x18F02B21;
     std::strcpy(dataVec[0].signal, "Crash_Typ");
     dataVec[0].value = 0;
