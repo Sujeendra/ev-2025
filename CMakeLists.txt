@@ -16,7 +16,7 @@ set(QML_IMPORT_PATH ${QT_QML_OUTPUT_DIRECTORY}
     FORCE
 )
 ## please change this to the boot2qt directory
-link_directories(C:/Qt/6.8.0/Boot2Qt/raspberrypi-armv8/toolchain/sysroots/cortexa53-poky-linux/usr/lib)
+link_directories(C:/Qt/6.8.3/Boot2Qt/raspberrypi-armv8/toolchain/sysroots/cortexa53-poky-linux/usr/lib)
 
 find_package(Qt6 6.7 REQUIRED COMPONENTS Core Gui Qml Quick VirtualKeyboard Sql Charts Graphs SerialBus)
 qt_standard_project_setup()
@@ -80,4 +80,4 @@ install(TARGETS ${CMAKE_PROJECT_NAME}
 )
 ## please change this to the boot2qt directory
 ## and copy the dll or .so from the dll folder of master thesis resources
-target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE C:/Qt/6.8.0/Boot2Qt/raspberrypi-armv8/toolchain/sysroots/cortexa53-poky-linux/usr/lib/libgpiod.so.3)
+target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE C:/Qt/6.8.3/Boot2Qt/raspberrypi-armv8/toolchain/sysroots/cortexa53-poky-linux/usr/lib/libgpiod.so.3)

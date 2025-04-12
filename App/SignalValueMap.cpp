@@ -10,21 +10,24 @@
 // int frameCount = 0;
 // qint64 elapsedTime = 0;
 
-
-SignalValueMap::SignalValueMap() {
-    QString path = "/root/vehicle.dbc";  // Replace with actual path to your DBC file
+SignalValueMap::SignalValueMap()
+{
+    QString path = "/root/vehicle.dbc"; // Replace with actual path to your DBC file
     QString str = QDir::toNativeSeparators(path);
 
     const bool result = fileParser.parse(str);
-    if (result) {
+    if (result)
+    {
         qDebug() << "DBC File Parsed Successfully:" << path;
-    } else {
+    }
+    else
+    {
         qDebug() << "Failed Parsing. Error:" << fileParser.errorString();
     }
     populateInitialDictionary();
 
     connect(&m_updateTimer, &QTimer::timeout, this, &SignalValueMap::updateDictionaryValues);
-    m_updateTimer.start(200);  // 200ms interval
+    m_updateTimer.start(2000); // 2000ms interval -- need to revisit and check if this is correct ui refresh timing
 
     m_worker = new CanWorker();
     m_workerThread = new QThread();
@@ -37,13 +40,13 @@ SignalValueMap::SignalValueMap() {
     // fpsTimer.start();
 }
 
-QList<SignalValue*> SignalValueMap::signalValueList() const {
+QList<SignalValue *> SignalValueMap::signalValueList() const
+{
     return m_signalValueList;
 }
 
-void SignalValueMap::updateDictionaryValues() {
-
-
+void SignalValueMap::updateDictionaryValues()
+{
 
     // Simulate some values to verify the dashboard
     // m_signalValueMap["VIC.HVESSD1_PGN61584.HS_ULvl"].value = QRandomGenerator::global()->bounded(800);
@@ -87,17 +90,20 @@ void SignalValueMap::updateDictionaryValues() {
     //     elapsedTime = 0;
     // }
 
-
     // qDebug() << "Frame Time (ms):" << frameTimeMs;
 }
 
-void SignalValueMap::processFrames(const QCanBusFrame& frame) {
-    for (const auto& message : fileParser.messageDescriptions()) {
-        if (static_cast<quint32>(message.uniqueId()) == frame.frameId()) {
+void SignalValueMap::processFrames(const QCanBusFrame &frame)
+{
+    for (const auto &message : fileParser.messageDescriptions())
+    {
+        if (static_cast<quint32>(message.uniqueId()) == frame.frameId())
+        {
             QString transmitterName = message.transmitter();
             QString messageName = message.name();
 
-            for (const auto& signal : message.signalDescriptions()) {
+            for (const auto &signal : message.signalDescriptions())
+            {
                 QString signalName = signal.name();
 
                 // Create the key: transmitterName.messageName.signalName
@@ -106,7 +112,7 @@ void SignalValueMap::processFrames(const QCanBusFrame& frame) {
                                   .arg(messageName)
                                   .arg(signalName);
 
-                qint32 value = decodeSignal(reinterpret_cast<const uint8_t*>(frame.payload().constData()),
+                qint32 value = decodeSignal(reinterpret_cast<const uint8_t *>(frame.payload().constData()),
                                             signal.offset(),
                                             signal.factor(),
                                             signal.startBit(),
@@ -116,13 +122,16 @@ void SignalValueMap::processFrames(const QCanBusFrame& frame) {
 
                 QString des = "";
                 auto messageDescriptions = fileParser.messageValueDescriptions();
-                if (messageDescriptions.contains(message.uniqueId())) {
+                if (messageDescriptions.contains(message.uniqueId()))
+                {
                     const auto &signalDescriptions = messageDescriptions.value(message.uniqueId());
 
-                    if (signalDescriptions.contains(signalName)) {
+                    if (signalDescriptions.contains(signalName))
+                    {
                         const auto &valueDescriptions = signalDescriptions.value(signalName);
 
-                        if (valueDescriptions.contains(value)) {
+                        if (valueDescriptions.contains(value))
+                        {
                             des = valueDescriptions.value(value);
                         }
                     }
@@ -135,12 +144,15 @@ void SignalValueMap::processFrames(const QCanBusFrame& frame) {
     }
 }
 
-void SignalValueMap::populateInitialDictionary() {
-    for (const auto& message : fileParser.messageDescriptions()) {
+void SignalValueMap::populateInitialDictionary()
+{
+    for (const auto &message : fileParser.messageDescriptions())
+    {
         QString transmitterName = message.transmitter();
         QString messageName = message.name();
 
-        for (const auto& signal : message.signalDescriptions()) {
+        for (const auto &signal : message.signalDescriptions())
+        {
             QString signalName = signal.name();
 
             // Create the key: transmitterName.messageName.signalName
@@ -156,12 +168,16 @@ void SignalValueMap::populateInitialDictionary() {
     updateSignalValueList();
 }
 
-void SignalValueMap::updateSignalValueList() {
-    for (auto it = m_signalValueMap.begin(); it != m_signalValueMap.end(); ++it) {
+void SignalValueMap::updateSignalValueList()
+{
+    for (auto it = m_signalValueMap.begin(); it != m_signalValueMap.end(); ++it)
+    {
         bool found = false;
 
-        for (SignalValue* signal : m_signalValueList) {
-            if (signal->key() == it.key()) {
+        for (SignalValue *signal : m_signalValueList)
+        {
+            if (signal->key() == it.key())
+            {
                 signal->setValue(it.value().value);
                 signal->setDescription(it.value().description);
                 signal->setComment(it.value().comment);
@@ -169,8 +185,9 @@ void SignalValueMap::updateSignalValueList() {
                 break;
             }
         }
-        if (!found) {
-            SignalValue* newSignal = new SignalValue();
+        if (!found)
+        {
+            SignalValue *newSignal = new SignalValue();
             newSignal->setKey(it.key());
             newSignal->setValue(it.value().value);
             newSignal->setDescription(it.value().description);
