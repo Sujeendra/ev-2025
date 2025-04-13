@@ -24,7 +24,7 @@ SignalValueMap::SignalValueMap() {
     populateInitialDictionary();
 
     connect(&m_updateTimer, &QTimer::timeout, this, &SignalValueMap::updateDictionaryValues);
-    m_updateTimer.start(2000);  // 2000ms interval
+    m_updateTimer.start(2000);  // 2000ms interval // this is ok timing to avoid ui freezes as we will be using m_signalValueMap for finite state machine approach
 
     m_worker = new CanWorker();
     m_workerThread = new QThread();

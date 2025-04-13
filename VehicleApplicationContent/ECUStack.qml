@@ -11,7 +11,7 @@ Item {
     DatabaseManager {
             id: dbManager
     }
-    property var columnNames: ["SheetName", "UniqueID", "Message", "Signal", "DeltaTime", "IsSHM", "CycleTime","Value"]
+    property var columnNames: ["NodeName", "SheetName", "UniqueID", "Message", "Signal", "DeltaTime", "IsSHM", "CycleTime","Value"]
 
     // Header for TableView
     HorizontalHeaderView {
@@ -23,6 +23,7 @@ Item {
 
         // Custom header model with SheetName as the first column
         model: ListModel {
+            ListElement { text: "NodeName" }
             ListElement { text: "SheetName" }
             ListElement { text: "UniqueID" }
             ListElement { text: "Message" }
@@ -63,14 +64,15 @@ Item {
         rowSpacing: 1
         columnWidthProvider: function (column) {
                    switch (column) {
-                       case 0: return 120; // SheetName column width
-                       case 1: return 100; // UniqueID column width
-                       case 2: return 150; // Message column width
-                       case 3: return 120; // Signal column width
-                       case 4: return 80;  // DeltaTime column width
-                       case 5: return 80;  // IsSHM column width
-                       case 6: return 100; // CycleTime column width
-                       case 7: return 100; // Value column width
+                       case 0: return 100; // NodeName column width
+                       case 1: return 120; // SheetName column width
+                       case 2: return 100; // UniqueID column width
+                       case 3: return 150; // Message column width
+                       case 4: return 120; // Signal column width
+                       case 5: return 80;  // DeltaTime column width
+                       case 6: return 80;  // IsSHM column width
+                       case 7: return 100; // CycleTime column width
+                       case 8: return 100; // Value column width
                        default: return 100; // Default column width
                    }
         }
