@@ -21,6 +21,7 @@ public:
     SignalValueMap();
 
     QList<SignalValue*> signalValueList() const;
+    QMap<QString, SignalInfo> m_signalValueMap;
 
 signals:
     void signalValueMapChanged();
@@ -34,7 +35,6 @@ private:
     void updateSignalValueList();
 
 private:
-    QMap<QString, SignalInfo> m_signalValueMap;
     QList<SignalValue*> m_signalValueList;
     QTimer m_updateTimer;
     CanWorker* m_worker;

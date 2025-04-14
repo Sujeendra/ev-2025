@@ -38,7 +38,11 @@
 #include <QTextStream>
 #include <QHash>
 #include <QFile>
-
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonArray>
+#include <QJsonValue>
+#include <QJsonParseError>
 
 // QFile file("/root/perf_messages_time.csv");
 // QTextStream stream(&file);
@@ -66,13 +70,7 @@
 //            << QString::number(canId, 16).toUpper() << ","
 //            << dataString << "\n";
 // }
-struct VehicleTabData {
-    int32_t pgn;        // PGN as an integer
-    double value;       // Value field
-    char signal[50];    // Array for signal as string
-    bool IsSent = false; //used for custom logic --> for now used to send different values at different instances
-};
-std::vector<VehicleTabData> dataVec(10);
+
 bool IsConnectForDriving = false;
 bool IsDataTransmissionStarted = false;
 bool IsConnectedForDCCharging = false;
@@ -82,6 +80,113 @@ bool SendGPIOSignal = false;
 bool HVReq=false;  // High voltage request
 bool IsBatteryContactorClosed = false;
 std::vector<uint32_t> frameIdsToForward = {0x1918FF71, 0x1919FF71, 0x191AFF71, 0xCFF91FD, 0xCFF92FD}; // both  sevcon hvlp and editron inverter data is forwarded but hvlp one is assumed we have to configure it for three  todo
+QMap<QString, double> dataVec;
+
+
+
+
+//   <------------------------------------------------------FSM related UTILS Starts here -------------------------------------------------------------------------->
+
+QJsonObject loadFSMFromFile(const QString& path) {
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) {
+        qWarning() << "Failed to open FSM file";
+        return {};
+    }
+    QByteArray data = file.readAll();
+    QJsonParseError err;
+    QJsonDocument doc = QJsonDocument::fromJson(data, &err);
+    if (err.error != QJsonParseError::NoError) {
+        qWarning() << "JSON parse error:" << err.errorString();
+        return {};
+    }
+    return doc.object();
+}
+
+bool evaluateSingleCondition(const QJsonObject& cond,
+                             const QMap<QString, SignalInfo>& signalValueMap) {
+    QString key = cond["key"].toString();
+    if (!signalValueMap.contains(key)) return false;
+
+    double actual = signalValueMap[key].value;
+
+    if (cond.contains("eq")) return qFuzzyCompare(actual + 1.0, cond["eq"].toDouble() + 1.0);
+    if (cond.contains("ne")) return !qFuzzyCompare(actual + 1.0, cond["ne"].toDouble() + 1.0);
+    if (cond.contains("lt")) return actual < cond["lt"].toDouble();
+    if (cond.contains("gt")) return actual > cond["gt"].toDouble();
+    if (cond.contains("le")) return actual <= cond["le"].toDouble();
+    if (cond.contains("ge")) return actual >= cond["ge"].toDouble();
+
+    return false;
+}
+
+bool evaluateFSMCondition(const QJsonObject& condition,
+                          const QMap<QString, SignalInfo>& signalValueMap) {
+    if (condition.contains("all")) {
+        QJsonArray all = condition["all"].toArray();
+        for (const auto& item : all) {
+            if (!evaluateSingleCondition(item.toObject(), signalValueMap))
+                return false;
+        }
+        return true;
+    }
+    if (condition.contains("any")) {
+        QJsonArray any = condition["any"].toArray();
+        for (const auto& item : any) {
+            if (evaluateSingleCondition(item.toObject(), signalValueMap))
+                return true;
+        }
+        return false;
+    }
+
+    // fallback for old flat condition style:
+    for (auto it = condition.begin(); it != condition.end(); ++it) {
+        const QString& key = it.key();
+        double expected = it.value().toDouble();
+        if (!signalValueMap.contains(key)) return false;
+        if (!qFuzzyCompare(signalValueMap[key].value + 1.0, expected + 1.0)) return false;
+    }
+    return true;
+}
+
+// recheck if the new key created works without explicitly inserting
+void performFSMAction(const QJsonObject& action,
+                      QMap<QString, double>& dataVec)
+{
+    QString key = action["signal"].toString().trimmed();
+    double value = action["value"].toDouble();
+    dataVec[key] = value;
+    qDebug() << "[FSM Action] Set" << key << "=" << value;
+}
+
+QString runFSMTransition(QJsonObject& fsm,
+                         const QString& currentState,
+                         const QMap<QString, SignalInfo>& signalValueMap,
+                         QMap<QString, double>& dataVec)
+{
+    QJsonArray states = fsm["states"].toArray();
+
+    for (const QJsonValue& stateVal : states) {
+        QJsonObject stateObj = stateVal.toObject();
+        if (stateObj["name"].toString() != currentState) continue;
+
+        QJsonArray transitions = stateObj["transitions"].toArray();
+        for (const QJsonValue& transVal : transitions) {
+            QJsonObject trans = transVal.toObject();
+            if (evaluateFSMCondition(trans["condition"].toObject(), signalValueMap)) {
+                QJsonArray actions = trans["actions"].toArray();
+                for (const QJsonValue& actVal : actions) {
+                    performFSMAction(actVal.toObject(), dataVec);
+                }
+                return trans["nextState"].toString();
+            }
+        }
+    }
+
+    return currentState; // No transition
+}
+//    <---------------------------------------------------------------FSM related Utils ends here --------------------------------------------------------------------->
+
 
 //can 0 is always code as vehicle CAN
 
@@ -141,9 +246,6 @@ void CreateSDMData(QCanDbcFileParser& fileParser, std::unordered_map<std::string
             // Find the matching message in SDM
             Message* result = findMessageInSDM(description.name().toStdString(), messages);
             if (result != nullptr) {
-                // Set message ID
-                quint32 uniqueId = static_cast<quint32>(description.uniqueId());
-                (*result).messageId29Bit =static_cast<int32_t>(uniqueId & 0x7FFFFFFF); // 29-bit message ID
 
                 // Loop over all signal descriptions in the message
                 for (const auto& signal : description.signalDescriptions()) {
@@ -154,20 +256,21 @@ void CreateSDMData(QCanDbcFileParser& fileParser, std::unordered_map<std::string
 
                     // Check if the element was found in SDM
                     if (value_it != (*result).SDM.end()) {
+                        QString key = QString::fromStdString(target_node) + "." +
+                                      description.name() + "." +
+                                      signal.name();
                         // Add check to read value from shared data if it has changed there
                         for (int i = 0; i < dataVec.size(); ++i) {
-                            if ((*result).messageId29Bit == dataVec[i].pgn && signal.name().toStdString() == dataVec[i].signal) {
-
-                                value_it->value = dataVec[i].value;
+                            if (dataVec.contains(key)){
+                                value_it->value =  dataVec[key];
+                                break;
                             }
                         }
 
-                        // If the value is found, process the signal encoding
-                        if (value_it != (*result).SDM.end()) {
-                            double value = value_it->value;
-                            // Encode the signal value using the QtCanDbc signal encoding method
-                            encodeSignal(value, signal.offset(), signal.factor(), signal.startBit(), signal.bitLength(), (*result).sdmSignedData, signal.dataEndian(),signal.dataFormat());
-                        }
+                        double value = value_it->value;
+                        // Encode the signal value using the QtCanDbc signal encoding method
+                        encodeSignal(value, signal.offset(), signal.factor(), signal.startBit(), signal.bitLength(), (*result).sdmSignedData, signal.dataEndian(),signal.dataFormat());
+
                     }
                 }
             }
@@ -178,8 +281,8 @@ class TimeDateResponder : public QObject {
     Q_OBJECT
 
 public:
-    explicit TimeDateResponder(QCanDbcFileParser& parser, std::unordered_map<std::string, Message>& messages)
-        : fileParser(parser), messages(messages) {}
+    explicit TimeDateResponder( QMap<QString, SignalInfo>& signalValueMap,QJsonObject& fsm)
+        : signalValueMap(signalValueMap),fsm(fsm) {}
 
     void initialize() {
         // Initialize CAN Bus Device
@@ -213,23 +316,13 @@ public:
 private:
     QCanBusDevice *canDevice = nullptr;
     QCanBusDevice *canDevice1 = nullptr;
-
-    QCanDbcFileParser& fileParser;
-    std::unordered_map<std::string, Message>& messages;
+    QMap<QString, SignalInfo>& signalValueMap;
+    QJsonObject& fsm;
 
     void processFrames() {
 
-        std::unordered_map<std::string, std::chrono::steady_clock::time_point> nextSendTime;
-        std::vector<Message> nonMainMessages; // Container to store messages from non-"Main" sheets
-
-
-        for (auto& pair : messages) {
-            if (!pair.second.SHM.empty()) {
-                nextSendTime[pair.first] = std::chrono::steady_clock::now();
-            }
-        }
-
-
+        QString currentState = fsm["initialState"].toString();
+        qDebug() << "Starting FSM in state:" << currentState;
         while (canDevice->framesAvailable()) {
             QCanBusFrame frame = canDevice->readFrame();
 
@@ -249,116 +342,68 @@ private:
                 canDevice->writeFrame(responseFrame);
 
             }
-            // if(!IsDataTransmissionStarted)
-            //     continue;
 
-            if (frame.frameId() == 0x18EF21F3 && dataVec[5].value == 0){
-                std::string target_node = "VIC";
-                for (const auto& message : fileParser.messageDescriptions()) {
-                    if (message.transmitter() == target_node && message.name() == "PropA_C3_PGN61184") {
-                        for (const auto& signal : message.signalDescriptions()) {
-                            if(signal.name() == "IChLimLong" ||  signal.name() == "UChLimLong")
-                            {
-                                double value=decodeSignal(reinterpret_cast<const uint8_t*>(frame.payload().constData()),signal.offset(), signal.factor(), signal.startBit(), signal.bitLength(),signal.dataEndian(),signal.dataFormat());
-                                if(signal.name() == "IChLimLong"){
-                                    dataVec[4].value = value;
-                                }
-                                else{
-                                    dataVec[3].value = value;
-                                }
-                            }
-                        }
-                        break;
-                    }
-                }
-            }
-            else if (frame.frameId() == 0x14F096F3){
-                std::string target_node = "VIC";
-                for (const auto& message : fileParser.messageDescriptions()) {
-                    if (message.transmitter() == target_node && message.name() == "HVESSS1_PGN61590") {
-                        int count=0;
-                        for (const auto& signal : message.signalDescriptions()) {
-
-                            if(signal.name() == "HS_IntChrgrSts")
-                            {
-                                double value=decodeSignal(reinterpret_cast<const uint8_t*>(frame.payload().constData()),signal.offset(), signal.factor(), signal.startBit(), signal.bitLength(),signal.dataEndian(),signal.dataFormat());
-                                //enable or disable charging
-                                if(value == 1 && IsConnectedForACCharging)
-                                    dataVec[5].value = 0;
-                                else
-                                    dataVec[5].value = 1;
-
-                                if(IsConnectedForDCCharging && value==1)
-                                    dataVec[2].value = 1;
-                                else
-                                    dataVec[2].value = 0;
-
-                                count++;
-                            }
-                            if(signal.name() == "HS_HiUBusCnctnSts")
-                            {
-                                double value=decodeSignal(reinterpret_cast<const uint8_t*>(frame.payload().constData()),signal.offset(), signal.factor(), signal.startBit(), signal.bitLength(),signal.dataEndian(),signal.dataFormat());
-                                //this is for taking action of sending connect for driving or charging can is initialised
-                                if(value==1)
-                                {
-                                    IsBatteryContactorClosed = true; // use this variable for additional logic build as shown below
-                                    //sequence transition of sevcon inverter from shutdown to energise to run only when battery contactors are closed
-                                    if(dataVec[9].value == 6)
-                                    {
-                                        dataVec[9].value=3;
-                                        dataVec[8].value=3;
-                                        dataVec[7].value=3;
-                                        dataVec[6].value=3;
-                                    }
-                                    //high chance this might not sink properly with the sending or receving node in that case read or decode value from sevcon signal
-                                    else if(dataVec[9].value == 3)
-                                    {
-                                        dataVec[9].value=5;
-                                        dataVec[8].value=5;
-                                        dataVec[7].value=5;
-                                        dataVec[6].value=5;
-                                    }
-
-                                }
-                                else if(value == 0)
-                                {
-                                    HVReq = true;
-                                    IsBatteryContactorClosed = false;
-                                }
-                                else
-                                    IsBatteryContactorClosed = false;
-
-                                count++;
-                            }
-                            if(count==2)
-                                break;
-                        }
-                        break;
-                    }
-                }
+            QString nextState = runFSMTransition(fsm, currentState, signalValueMap, dataVec);
+            if (nextState != currentState) {
+                qDebug() << "[FSM] Transitioned:" << currentState << "→" << nextState;
+                currentState = nextState;
+            } else {
+                qDebug() << "[FSM] No transition from state:" << currentState;
             }
 
 
-            // frame forward
+            // todo: move below implementation to the fsm json file
+
+
+            // if (frame.frameId() == 0x14F096F3){
+            //     std::string target_node = "VIC";
+            //     for (const auto& message : fileParser.messageDescriptions()) {
+            //         if (message.transmitter() == target_node && message.name() == "HVESSS1_PGN61590") {
+            //             int count=0;
+            //             for (const auto& signal : message.signalDescriptions()) {
+
+            //                 if(signal.name() == "HS_HiUBusCnctnSts")
+            //                 {
+            //                     double value=decodeSignal(reinterpret_cast<const uint8_t*>(frame.payload().constData()),signal.offset(), signal.factor(), signal.startBit(), signal.bitLength(),signal.dataEndian(),signal.dataFormat());
+            //                     //this is for taking action of sending connect for driving or charging can is initialised
+            //                     if(value==1)
+            //                     {
+            //                         IsBatteryContactorClosed = true; // use this variable for additional logic build as shown below
+            //                         //sequence transition of sevcon inverter from shutdown to energise to run only when battery contactors are closed
+            //                         if(dataVec[9].value == 6)
+            //                         {
+            //                             dataVec[9].value=3;
+            //                             dataVec[8].value=3;
+            //                             dataVec[7].value=3;
+            //                             dataVec[6].value=3;
+            //                         }
+            //                         //high chance this might not sink properly with the sending or receving node in that case read or decode value from sevcon signal
+            //                         else if(dataVec[9].value == 3)
+            //                         {
+            //                             dataVec[9].value=5;
+            //                             dataVec[8].value=5;
+            //                             dataVec[7].value=5;
+            //                             dataVec[6].value=5;
+            //                         }
+
+            //                     }
+
+            //                     count++;
+            //                 }
+            //                 if(count==2)
+            //                     break;
+            //             }
+            //             break;
+            //         }
+            //     }
+            // }
+
+
+            // frame forward to CAN 1
             if (std::find(frameIdsToForward.begin(), frameIdsToForward.end(), frame.frameId()) != frameIdsToForward.end()) {
                 // Forward frame to can1
                 canDevice1->writeFrame(frame);
             }
-            // Prepare SDM data and send them via CAN bus
-            // for (auto& pair : messages) {
-
-                //     auto& message = pair.second;
-                //     std::string messageId = pair.first;
-
-            //     auto now = std::chrono::steady_clock::now();
-            //     if (now >= nextSendTime[messageId]) {
-            //         CreateSDMData(fileParser, messages);
-            //         QCanBusFrame sdmFrame(message.messageId29Bit, QByteArray(reinterpret_cast<const char*>(message.sdmSignedData.data()), message.sdmSignedData.size()));
-            //         sdmFrame.setFrameType(QCanBusFrame::DataFrame);
-            //         canDevice->writeFrame(sdmFrame);
-            //         nextSendTime[messageId] += std::chrono::milliseconds(static_cast<int>(message.SDM[0].cycleTime));
-            //     }
-            // }
         }
     }
 
@@ -738,65 +783,64 @@ public:
             HVReq=false;
             // file.close();
             // qDebug() << "CAN data logged to can_log.csv";
-            // dataVec[1].IsSent = false;
         }
         SendGPIOSignal=true;
     }
 
+        //possibly check if these keys exists before accesing to avoid crashes in the UI
     Q_INVOKABLE void toggleConnectDriving(bool checked) {
         if (checked) {
-            dataVec[1].value = 3;
+            dataVec["Vehicle_Control_Unit.S1_ES_PGN61427.Control_Es_Relay"] = 3;
             IsConnectForDriving = true;
             // stream << "Timestamp,CAN_ID\n";
 
         } else {
             IsConnectForDriving = false;
-            dataVec[1].value = 0;
-            // dataVec[1].IsSent = false;
-            //sevcon inverter control word set for all the4 inverter
-            dataVec[9].value = 6;
-            dataVec[8].value = 6;
-            dataVec[7].value = 6;
-            dataVec[6].value = 6;
+            dataVec["Vehicle_Control_Unit.S1_ES_PGN61427.Control_Es_Relay"] = 0;
+
+            //sevcon inverter control word set for all the 4 inverter
+            dataVec["Vehicle_Control_Unit.HC1_Demands.ControlWord"] = 6;
+            dataVec["Vehicle_Control_Unit.HC1_Demands_2.ControlWord"] = 6;
+            dataVec["Vehicle_Control_Unit.HC1_Demands_3.ControlWord"] = 6;
+            dataVec["Vehicle_Control_Unit.HC1_Demands_4.ControlWord"] = 6;
         }
 
     }
+    //possibly check if these keys exists before accesing to avoid crashes in the UI
 
     Q_INVOKABLE void toggleACCharging(bool checked) {
         if (checked) {
-            dataVec[1].value = 2;
+            dataVec["Vehicle_Control_Unit.S1_ES_PGN61427.Control_Es_Relay"] = 2;
             IsConnectForDriving = true;
             IsConnectedForACCharging=true;
 
         } else {
-            dataVec[1].value = 0;
+            dataVec["Vehicle_Control_Unit.S1_ES_PGN61427.Control_Es_Relay"] = 0;
             // dataVec[1].IsSent = false;
             IsConnectForDriving = false;
             IsConnectedForACCharging=false;
         }
     }
-
+    //possibly check if these keys exists before accesing to avoid crashes in the UI
     Q_INVOKABLE void toggleDCCharging(bool checked) {
         if (checked) {
-           dataVec[1].value = 5;
-           // dataVec[2].value = 1;
+           dataVec["Vehicle_Control_Unit.S1_ES_PGN61427.Control_Es_Relay"] = 5;
            IsConnectForDriving = true;
            IsConnectedForDCCharging=true;
         } else {
-            dataVec[1].value = 0;
-            // dataVec[1].IsSent = false;
-            // dataVec[2].value = 0;
+            dataVec["Vehicle_Control_Unit.S1_ES_PGN61427.Control_Es_Relay"] = 0;
             IsConnectForDriving = false;
             IsConnectedForDCCharging=false;
 
         }
     }
+    //possibly check if these keys exists before accesing to avoid crashes in the UI
     Q_INVOKABLE void toggleCrash(bool checked) {
         if (checked) {
-            dataVec[0].value = 1;
+            dataVec["Vehicle_Control_Unit.CN_PGN61483.Crash_Typ"] = 1;
             IsConnectForDriving = true;
         } else {
-            dataVec[0].value = 0;
+            dataVec["Vehicle_Control_Unit.CN_PGN61483.Crash_Typ"] = 0;
             IsConnectForDriving = false;
         }
     }
@@ -1126,20 +1170,20 @@ int main(int argc, char *argv[]) {
     // dbManager.deleteRecord("UniqueID = '11'");
     // dbManager.deleteRecord("UniqueID = '12'");
 
-    //         dbManager.deleteRecord("UniqueID = '65312'");
-    //         dbManager.deleteRecord("UniqueID = '65313'");
-    //         dbManager.deleteRecord("UniqueID = '65314'");
-    //         dbManager.deleteRecord("UniqueID = '65315'");
-    //         dbManager.deleteRecord("UniqueID = '65316'");
-    //         dbManager.deleteRecord("UniqueID = '65317'");
-    //         dbManager.deleteRecord("UniqueID = '65318'");
-    //         dbManager.deleteRecord("UniqueID = '65319'");
-    //         dbManager.deleteRecord("UniqueID = '65320'");
-    //         dbManager.deleteRecord("UniqueID = '65321'");
-    //         dbManager.deleteRecord("UniqueID = '65296'");
-    //         dbManager.deleteRecord("UniqueID = '65297'");
-    //         dbManager.deleteRecord("UniqueID = '65298'");
-    //         dbManager.deleteRecord("UniqueID = '0x01'");
+    // dbManager.deleteRecord("UniqueID = '65312'");
+    // dbManager.deleteRecord("UniqueID = '65313'");
+    // dbManager.deleteRecord("UniqueID = '65314'");
+    // dbManager.deleteRecord("UniqueID = '65315'");
+    // dbManager.deleteRecord("UniqueID = '65316'");
+    // dbManager.deleteRecord("UniqueID = '65317'");
+    // dbManager.deleteRecord("UniqueID = '65318'");
+    // dbManager.deleteRecord("UniqueID = '65319'");
+    // dbManager.deleteRecord("UniqueID = '65320'");
+    // dbManager.deleteRecord("UniqueID = '65321'");
+    // dbManager.deleteRecord("UniqueID = '65296'");
+    // dbManager.deleteRecord("UniqueID = '65297'");
+    // dbManager.deleteRecord("UniqueID = '65298'");
+    // dbManager.deleteRecord("UniqueID = '0x01'");
 
     // // Remove all records
     // dbManager.removeAllRecords();
@@ -1254,16 +1298,12 @@ int main(int argc, char *argv[]) {
         logManager.addLog("Failed Parsing. Error:"+ fileParser.errorString());
 
     }
-    std::unordered_map<std::string, Message> nonMainMessages;
+    // CAN reciever logic sits here
+    //todo: replace below implementation with fsm
+    QJsonObject fsm = loadFSMFromFile("/root/fsm.json");
 
-    for (auto& pair : messages) {
-        auto& message = pair.second;
-        if (message.sheetName != "Main") {
-            nonMainMessages[pair.first] = message;// Add the message to the vector
-        }
-    }
-    TimeDateResponder responder(fileParser,nonMainMessages);
-    responder.initialize(); // Replace with your CAN interface name
+    TimeDateResponder responder(signalValueMapInstance.m_signalValueMap,fsm);
+    responder.initialize();
 
 
 
@@ -1286,47 +1326,6 @@ int main(int argc, char *argv[]) {
     CanMessageSenderGroup2 senderGroup2(fileParser, group2Messages); // main thread handling logic flow
     senderGroup2.start();  // This starts the thread
 
-    //todo: replace below implementation with fsm
-    dataVec[0].pgn = 0x18F02B21;
-    std::strcpy(dataVec[0].signal, "Crash_Typ");
-    dataVec[0].value = 0;
-
-    dataVec[1].pgn = 0xCEFF321;
-    std::strcpy(dataVec[1].signal, "Control_Es_Relay");
-    dataVec[1].value = 0;
-
-    dataVec[2].pgn = 0x1800F5E5;
-    std::strcpy(dataVec[2].signal, "VCU_DCDC_Command");
-    dataVec[2].value = 0;
-
-    dataVec[3].pgn = 0x1806E5F4;
-    std::strcpy(dataVec[3].signal, "BMS_Max_Voltage");
-    dataVec[3].value = 300;
-
-    dataVec[4].pgn = 0x1806E5F4;
-    std::strcpy(dataVec[4].signal, "BMS_Max_Current");
-    dataVec[4].value = 60;
-
-    dataVec[5].pgn = 0x1806E5F4;
-    std::strcpy(dataVec[5].signal, "BMS_Control");
-    dataVec[5].value = 1;
-
-    //if battery contactors are closed then only send 6->3->5 sequence command to 4 sevcon inverter to turn on
-    dataVec[6].pgn = 0x19107171;
-    std::strcpy(dataVec[6].signal, "ControlWord");
-    dataVec[6].value = 6;
-
-    dataVec[7].pgn = 0x19107172;
-    std::strcpy(dataVec[7].signal, "ControlWord");
-    dataVec[7].value = 6;
-
-    dataVec[8].pgn = 0x19107173;
-    std::strcpy(dataVec[8].signal, "ControlWord");
-    dataVec[8].value = 6;
-
-    dataVec[9].pgn = 0x19107174;
-    std::strcpy(dataVec[9].signal, "ControlWord");
-    dataVec[9].value = 6;
 
     //todo handle current discharge and charge basically forward the battery limit to the motors by dividing them properly
     //handle regen if required declare the variable here and handle the functionality
@@ -1334,7 +1333,6 @@ int main(int argc, char *argv[]) {
 
     //how to handle sequence of value change like a state machine transition: for each event like when vehicle start, vehicle stop to charging
     //connect for driving handles both charging, driving or regen
-
 
     // CanNonSHMMessageSender nonShmSender(fileParser,messages);
     // nonShmSender.initialize();
