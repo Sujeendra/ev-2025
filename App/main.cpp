@@ -81,6 +81,7 @@ bool HVReq=false;  // High voltage request
 bool IsBatteryContactorClosed = false;
 std::vector<uint32_t> frameIdsToForward = {0x1918FF71, 0x1919FF71, 0x191AFF71, 0xCFF91FD, 0xCFF92FD}; // both  sevcon hvlp and editron inverter data is forwarded but hvlp one is assumed we have to configure it for three  todo
 QMap<QString, double> dataVec;
+SignalValueMap signalValueMapInstance;
 
 
 
@@ -107,6 +108,8 @@ bool evaluateSingleCondition(const QJsonObject& cond,
                              const QMap<QString, SignalInfo>& signalValueMap) {
     QString key = cond["key"].toString();
     if (!signalValueMap.contains(key)) return false;
+    //if not valid then return false as there is no data
+    if(!signalValueMap[key].IsValid) return false;
 
     double actual = signalValueMap[key].value;
 
@@ -144,6 +147,7 @@ bool evaluateFSMCondition(const QJsonObject& condition,
         const QString& key = it.key();
         double expected = it.value().toDouble();
         if (!signalValueMap.contains(key)) return false;
+        if(!signalValueMap[key].IsValid) return false;
         if (!qFuzzyCompare(signalValueMap[key].value + 1.0, expected + 1.0)) return false;
     }
     return true;
@@ -156,6 +160,7 @@ void performFSMAction(const QJsonObject& action,
     QString key = action["signal"].toString().trimmed();
     double value = action["value"].toDouble();
     dataVec[key] = value;
+    // the output of this is shown in the application output
     qDebug() << "[FSM Action] Set" << key << "=" << value;
 }
 
@@ -178,6 +183,8 @@ QString runFSMTransition(QJsonObject& fsm,
                 for (const QJsonValue& actVal : actions) {
                     performFSMAction(actVal.toObject(), dataVec);
                 }
+                logManager.addLog("Next State is: ");
+                logManager.addLog(trans["nextState"].toString());
                 return trans["nextState"].toString();
             }
         }
@@ -350,54 +357,6 @@ private:
             } else {
                 qDebug() << "[FSM] No transition from state:" << currentState;
             }
-
-
-            // todo: move below implementation to the fsm json file
-
-
-            // if (frame.frameId() == 0x14F096F3){
-            //     std::string target_node = "VIC";
-            //     for (const auto& message : fileParser.messageDescriptions()) {
-            //         if (message.transmitter() == target_node && message.name() == "HVESSS1_PGN61590") {
-            //             int count=0;
-            //             for (const auto& signal : message.signalDescriptions()) {
-
-            //                 if(signal.name() == "HS_HiUBusCnctnSts")
-            //                 {
-            //                     double value=decodeSignal(reinterpret_cast<const uint8_t*>(frame.payload().constData()),signal.offset(), signal.factor(), signal.startBit(), signal.bitLength(),signal.dataEndian(),signal.dataFormat());
-            //                     //this is for taking action of sending connect for driving or charging can is initialised
-            //                     if(value==1)
-            //                     {
-            //                         IsBatteryContactorClosed = true; // use this variable for additional logic build as shown below
-            //                         //sequence transition of sevcon inverter from shutdown to energise to run only when battery contactors are closed
-            //                         if(dataVec[9].value == 6)
-            //                         {
-            //                             dataVec[9].value=3;
-            //                             dataVec[8].value=3;
-            //                             dataVec[7].value=3;
-            //                             dataVec[6].value=3;
-            //                         }
-            //                         //high chance this might not sink properly with the sending or receving node in that case read or decode value from sevcon signal
-            //                         else if(dataVec[9].value == 3)
-            //                         {
-            //                             dataVec[9].value=5;
-            //                             dataVec[8].value=5;
-            //                             dataVec[7].value=5;
-            //                             dataVec[6].value=5;
-            //                         }
-
-            //                     }
-
-            //                     count++;
-            //                 }
-            //                 if(count==2)
-            //                     break;
-            //             }
-            //             break;
-            //         }
-            //     }
-            // }
-
 
             // frame forward to CAN 1
             if (std::find(frameIdsToForward.begin(), frameIdsToForward.end(), frame.frameId()) != frameIdsToForward.end()) {
@@ -781,6 +740,11 @@ public:
         } else {
             IsDataTransmissionStarted = false;
             HVReq=false;
+
+            //this is critical as we need to make all the dictionary values invalid due to no CAN data being recieved otherwise it will take the old value and do state transition which is undesirable
+            for (auto it = signalValueMapInstance.m_signalValueMap.begin(); it != signalValueMapInstance.m_signalValueMap.end(); ++it) {
+                it->IsValid = false;
+            }
             // file.close();
             // qDebug() << "CAN data logged to can_log.csv";
         }
@@ -889,7 +853,6 @@ int main(int argc, char *argv[]) {
     // Create and expose TimeManager to QML
     TimeManager timeManager;
     engine.rootContext()->setContextProperty("timeManager", &timeManager);
-    SignalValueMap signalValueMapInstance;
     // Expose to QML
     engine.rootContext()->setContextProperty("signalValueMap", &signalValueMapInstance);
     qmlRegisterType<DatabaseManager>("com.example.db", 1, 0, "DatabaseManager");

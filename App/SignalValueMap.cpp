@@ -128,7 +128,8 @@ void SignalValueMap::processFrames(const QCanBusFrame& frame) {
                     }
                 }
                 QString comment = signal.comment();
-                m_signalValueMap[key] = SignalInfo(value, comment, des);
+                // set this to false when Stop button is pressed from the vehicle control tab
+                m_signalValueMap[key] = SignalInfo(value, comment, des,true);
             }
             break;
         }
@@ -149,8 +150,8 @@ void SignalValueMap::populateInitialDictionary() {
                               .arg(messageName)
                               .arg(signalName);
 
-            // Initialize with a default value
-            m_signalValueMap.insert(key, SignalInfo(0, "", ""));
+            // Initialize wim_signalValueMapth a default value
+            m_signalValueMap.insert(key, SignalInfo(0, "", "",false));
         }
     }
     updateSignalValueList();
