@@ -119,6 +119,15 @@ bool evaluateSingleCondition(const QJsonObject& cond,
     if (cond.contains("gt")) return actual > cond["gt"].toDouble();
     if (cond.contains("le")) return actual <= cond["le"].toDouble();
     if (cond.contains("ge")) return actual >= cond["ge"].toDouble();
+    if (cond.contains("in")) {
+        auto jsonArray = cond["in"].toArray();
+        for (const auto& v : jsonArray) {
+            if (v.toDouble() == actual) {
+                return true;
+            }
+        }
+        return false;
+    }
 
     return false;
 }
