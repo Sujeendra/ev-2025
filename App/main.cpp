@@ -44,6 +44,7 @@
 #include <QJsonValue>
 #include <QJsonParseError>
 
+
 // QFile file("/root/perf_messages_time.csv");
 // QTextStream stream(&file);
 
@@ -80,9 +81,9 @@ bool SendGPIOSignal = false;
 bool HVReq=false;  // High voltage request
 bool IsBatteryContactorClosed = false;
 std::vector<uint32_t> frameIdsToForward = {0x1918FF71, 0x1919FF71, 0x191AFF71, 0xCFF91FD, 0xCFF92FD}; // both  sevcon hvlp and editron inverter data is forwarded but hvlp one is assumed we have to configure it for three  todo
-QMap<QString, double> dataVec;
-SignalValueMap signalValueMapInstance;
 
+
+QMap<QString, double> dataVec;
 
 
 
@@ -170,7 +171,7 @@ void performFSMAction(const QJsonObject& action,
     double value = action["value"].toDouble();
     dataVec[key] = value;
     // the output of this is shown in the application output
-    qDebug() << "[FSM Action] Set" << key << "=" << value;
+    // qDebug() << "[FSM Action] Set" << key << "=" << value;
 }
 
 QString runFSMTransition(QJsonObject& fsm,
@@ -192,8 +193,8 @@ QString runFSMTransition(QJsonObject& fsm,
                 for (const QJsonValue& actVal : actions) {
                     performFSMAction(actVal.toObject(), dataVec);
                 }
-                logManager.addLog("Next State is: ");
-                logManager.addLog(trans["nextState"].toString());
+                // logManager.addLog("Next State is: ");
+                // logManager.addLog(trans["nextState"].toString());
                 return trans["nextState"].toString();
             }
         }
@@ -202,7 +203,6 @@ QString runFSMTransition(QJsonObject& fsm,
     return currentState; // No transition
 }
 //    <---------------------------------------------------------------FSM related Utils ends here --------------------------------------------------------------------->
-
 
 //can 0 is always code as vehicle CAN
 
@@ -262,6 +262,9 @@ void CreateSDMData(QCanDbcFileParser& fileParser, std::unordered_map<std::string
             // Find the matching message in SDM
             Message* result = findMessageInSDM(description.name().toStdString(), messages);
             if (result != nullptr) {
+                // Set message ID
+                quint32 uniqueId = static_cast<quint32>(description.uniqueId());
+                (*result).messageId29Bit =static_cast<int32_t>(uniqueId & 0x7FFFFFFF); // 29-bit message ID
 
                 // Loop over all signal descriptions in the message
                 for (const auto& signal : description.signalDescriptions()) {
@@ -286,7 +289,6 @@ void CreateSDMData(QCanDbcFileParser& fileParser, std::unordered_map<std::string
                         double value = value_it->value;
                         // Encode the signal value using the QtCanDbc signal encoding method
                         encodeSignal(value, signal.offset(), signal.factor(), signal.startBit(), signal.bitLength(), (*result).sdmSignedData, signal.dataEndian(),signal.dataFormat());
-
                     }
                 }
             }
@@ -325,6 +327,8 @@ public:
             return;
         }
         logManager.addLog("CAN1 connected successfully.");
+        currentState = fsm["initialState"].toString();
+        qDebug() << "Starting FSM in state:" << currentState;
         // Connect to frame reception
         connect(canDevice, &QCanBusDevice::framesReceived, this, &TimeDateResponder::processFrames);
     }
@@ -334,11 +338,12 @@ private:
     QCanBusDevice *canDevice1 = nullptr;
     QMap<QString, SignalInfo>& signalValueMap;
     QJsonObject& fsm;
+    QString currentState;
+
 
     void processFrames() {
 
-        QString currentState = fsm["initialState"].toString();
-        qDebug() << "Starting FSM in state:" << currentState;
+
         while (canDevice->framesAvailable()) {
             QCanBusFrame frame = canDevice->readFrame();
 
@@ -358,20 +363,37 @@ private:
                 canDevice->writeFrame(responseFrame);
 
             }
+            // if(!IsDataTransmissionStarted)
+            //     continue;
 
             QString nextState = runFSMTransition(fsm, currentState, signalValueMap, dataVec);
             if (nextState != currentState) {
                 qDebug() << "[FSM] Transitioned:" << currentState << "→" << nextState;
                 currentState = nextState;
-            } else {
+            }/* else {
                 qDebug() << "[FSM] No transition from state:" << currentState;
-            }
-
-            // frame forward to CAN 1
+            }*/
+            // frame forward
             if (std::find(frameIdsToForward.begin(), frameIdsToForward.end(), frame.frameId()) != frameIdsToForward.end()) {
                 // Forward frame to can1
                 canDevice1->writeFrame(frame);
             }
+
+            // Prepare SDM data and send them via CAN bus
+            // for (auto& pair : messages) {
+
+                //     auto& message = pair.second;
+                //     std::string messageId = pair.first;
+
+            //     auto now = std::chrono::steady_clock::now();
+            //     if (now >= nextSendTime[messageId]) {
+            //         CreateSDMData(fileParser, messages);
+            //         QCanBusFrame sdmFrame(message.messageId29Bit, QByteArray(reinterpret_cast<const char*>(message.sdmSignedData.data()), message.sdmSignedData.size()));
+            //         sdmFrame.setFrameType(QCanBusFrame::DataFrame);
+            //         canDevice->writeFrame(sdmFrame);
+            //         nextSendTime[messageId] += std::chrono::milliseconds(static_cast<int>(message.SDM[0].cycleTime));
+            //     }
+            // }
         }
     }
 
@@ -510,11 +532,11 @@ private:
 
                 auto& message = pair.second;
                 //if not connected for driving dont send this message
-                if(message.SDM[0].message == "S1_ES_PGN61427" && !IsConnectForDriving && !HVReq)
-                {
-                    nextSendTime[pair.first] = std::chrono::steady_clock::now();
-                    continue;
-                }
+                // if(message.SDM[0].message == "S1_ES_PGN61427" && !IsConnectForDriving && !HVReq)
+                // {
+                //     nextSendTime[pair.first] = std::chrono::steady_clock::now();
+                //     continue;
+                // }
 
                 std::string messageId = pair.first;
                 // if (message.sheetName != "Main")
@@ -544,7 +566,7 @@ private:
                                 QCanBusFrame shmFrame(shmId, shmDataArray);
                                 shmFrame.setFrameType(QCanBusFrame::DataFrame);
                                 // if(msg.name()!="S1_ES_PGN61427_SHM_Rx")
-                                    canBusDevice->writeFrame(shmFrame);
+                                canBusDevice->writeFrame(shmFrame);
 
 
                                 nextSendTime[messageId] += std::chrono::milliseconds(static_cast<int>(message.SHM[0].cycleTime));
@@ -657,11 +679,7 @@ private:
 
                 auto& message = pair.second;
                 //if not connected for driving dont send this message
-                if(message.SDM[0].message == "S1_ES_PGN61427" && !IsConnectForDriving && !HVReq)
-                {
-                    nextSendTime[pair.first] = std::chrono::steady_clock::now();
-                    continue;
-                }
+
 
                 std::string messageId = pair.first;
                 // if (message.sheetName != "Main")
@@ -732,8 +750,8 @@ class MainController : public QObject
     Q_OBJECT
 
 public:
-    explicit MainController(QObject *parent = nullptr) : QObject(parent) {}
-
+    explicit MainController(SignalValueMap& signalValueMapInstance, QObject *parent = nullptr)
+        : QObject(parent), m_signalValueMapInstance(signalValueMapInstance) {}
     // Make the function invokable using Q_INVOKABLE
     Q_INVOKABLE void toggleStartStop(bool checked) {
         if (checked) {
@@ -741,6 +759,7 @@ public:
             //logs
             QDateTime cstTime = QDateTime::currentDateTimeUtc().toTimeZone(QTimeZone("America/Chicago"));
             logManager.addLog("Vehicle CAN Transmission Started for Battery initilisation at: "+ cstTime.toString());
+            dataVec["Vehicle_Control_Unit.S1_ES_PGN61427.Control_Es_Relay"] = 3;
 
             // Write CSV header
             // stream << "Timestamp,CAN_ID,Data\n";
@@ -751,72 +770,82 @@ public:
             HVReq=false;
 
             //this is critical as we need to make all the dictionary values invalid due to no CAN data being recieved otherwise it will take the old value and do state transition which is undesirable
-            for (auto it = signalValueMapInstance.m_signalValueMap.begin(); it != signalValueMapInstance.m_signalValueMap.end(); ++it) {
+            for (auto it = m_signalValueMapInstance.m_signalValueMap.begin(); it != m_signalValueMapInstance.m_signalValueMap.end(); ++it) {
                 it->IsValid = false;
             }
+            dataVec["Vehicle_Control_Unit.S1_ES_PGN61427.Control_Es_Relay"] = 0;
+
             // file.close();
             // qDebug() << "CAN data logged to can_log.csv";
         }
         SendGPIOSignal=true;
     }
 
-        //possibly check if these keys exists before accesing to avoid crashes in the UI
     Q_INVOKABLE void toggleConnectDriving(bool checked) {
         if (checked) {
-            dataVec["Vehicle_Control_Unit.S1_ES_PGN61427.Control_Es_Relay"] = 3;
             IsConnectForDriving = true;
+            dataVec["Vehicle_Control_Unit.PDU_Rx_1.Close_GroupA_Contactors"] = 1;
+            dataVec["Vehicle_Control_Unit.PDU_Rx_1.Close_GroupB_Contactors"] = 1;
             // stream << "Timestamp,CAN_ID\n";
 
         } else {
             IsConnectForDriving = false;
-            dataVec["Vehicle_Control_Unit.S1_ES_PGN61427.Control_Es_Relay"] = 0;
-
+            //sevcon inverter control word set for all the4 inverter
+            dataVec["Vehicle_Control_Unit.PDU_Rx_1.Close_GroupA_Contactors"] = 0;
+            dataVec["Vehicle_Control_Unit.PDU_Rx_1.Close_GroupB_Contactors"] = 0;
             //sevcon inverter control word set for all the 4 inverter
             dataVec["Vehicle_Control_Unit.HC1_Demands.ControlWord"] = 6;
             dataVec["Vehicle_Control_Unit.HC1_Demands_2.ControlWord"] = 6;
             dataVec["Vehicle_Control_Unit.HC1_Demands_3.ControlWord"] = 6;
             dataVec["Vehicle_Control_Unit.HC1_Demands_4.ControlWord"] = 6;
+
         }
 
     }
-    //possibly check if these keys exists before accesing to avoid crashes in the UI
 
     Q_INVOKABLE void toggleACCharging(bool checked) {
         if (checked) {
-            dataVec["Vehicle_Control_Unit.S1_ES_PGN61427.Control_Es_Relay"] = 2;
             IsConnectForDriving = true;
             IsConnectedForACCharging=true;
+            dataVec["Vehicle_Control_Unit.S1_ES_PGN61427.Control_Es_Relay"] = 2;
+
 
         } else {
-            dataVec["Vehicle_Control_Unit.S1_ES_PGN61427.Control_Es_Relay"] = 0;
-            // dataVec[1].IsSent = false;
             IsConnectForDriving = false;
             IsConnectedForACCharging=false;
-        }
-    }
-    //possibly check if these keys exists before accesing to avoid crashes in the UI
-    Q_INVOKABLE void toggleDCCharging(bool checked) {
-        if (checked) {
-           dataVec["Vehicle_Control_Unit.S1_ES_PGN61427.Control_Es_Relay"] = 5;
-           IsConnectForDriving = true;
-           IsConnectedForDCCharging=true;
-        } else {
             dataVec["Vehicle_Control_Unit.S1_ES_PGN61427.Control_Es_Relay"] = 0;
-            IsConnectForDriving = false;
-            IsConnectedForDCCharging=false;
 
         }
     }
-    //possibly check if these keys exists before accesing to avoid crashes in the UI
-    Q_INVOKABLE void toggleCrash(bool checked) {
+
+    Q_INVOKABLE void toggleDCCharging(bool checked) {
         if (checked) {
-            dataVec["Vehicle_Control_Unit.CN_PGN61483.Crash_Typ"] = 1;
             IsConnectForDriving = true;
+            IsConnectedForDCCharging=true;
+            dataVec["Vehicle_Control_Unit.S1_ES_PGN61427.Control_Es_Relay"] = 5;
+
         } else {
-            dataVec["Vehicle_Control_Unit.CN_PGN61483.Crash_Typ"] = 0;
+
             IsConnectForDriving = false;
+            IsConnectedForDCCharging=false;
+            dataVec["Vehicle_Control_Unit.S1_ES_PGN61427.Control_Es_Relay"] = 0;
+
+
         }
     }
+    Q_INVOKABLE void toggleCrash(bool checked) {
+        if (checked) {
+            IsConnectForDriving = true;
+            dataVec["Vehicle_Control_Unit.CN_PGN61483.Crash_Typ"] = 1;
+
+        } else {
+            IsConnectForDriving = false;
+            dataVec["Vehicle_Control_Unit.CN_PGN61483.Crash_Typ"] = 0;
+
+        }
+    }
+private:
+    SignalValueMap& m_signalValueMapInstance;
 };
 void splitMessagesByNodeName(
     const std::unordered_map<std::string, Message>& inputMessages,
@@ -862,11 +891,13 @@ int main(int argc, char *argv[]) {
     // Create and expose TimeManager to QML
     TimeManager timeManager;
     engine.rootContext()->setContextProperty("timeManager", &timeManager);
+    SignalValueMap signalValueMapInstance;
+
     // Expose to QML
     engine.rootContext()->setContextProperty("signalValueMap", &signalValueMapInstance);
     qmlRegisterType<DatabaseManager>("com.example.db", 1, 0, "DatabaseManager");
     qmlRegisterType<MainController>("MainController", 1, 0, "MainController");
-    MainController mainController;
+    MainController mainController(signalValueMapInstance);
     engine.rootContext()->setContextProperty("mainController", &mainController);
 
 
@@ -899,9 +930,6 @@ int main(int argc, char *argv[]) {
     //NodeName, SheetName, UniqueID, Message, Signal, DeltaTime, IsSHM,CycleTime,Value -- columns order
 
 
-
-    // // Remove all records
-    // dbManager.removeAllRecords();
     // // Read data into model
     std::unordered_map<std::string, Message> messages;
     QSqlQueryModel *model = dbManager.readData();
@@ -1013,8 +1041,14 @@ int main(int argc, char *argv[]) {
         logManager.addLog("Failed Parsing. Error:"+ fileParser.errorString());
 
     }
-    // CAN reciever logic sits here
-    //todo: replace below implementation with fsm
+    std::unordered_map<std::string, Message> nonMainMessages;
+
+    for (auto& pair : messages) {
+        auto& message = pair.second;
+        if (message.sheetName != "Main") {
+            nonMainMessages[pair.first] = message;// Add the message to the vector
+        }
+    }
     QJsonObject fsm = loadFSMFromFile("/root/fsm.json");
 
     TimeDateResponder responder(signalValueMapInstance.m_signalValueMap,fsm);
@@ -1022,11 +1056,12 @@ int main(int argc, char *argv[]) {
 
 
 
+
     //fix to split the messages based on nodename column and spawn the new thread after splitting
     // group 1:  vig, pdu, obc -- power data together as they are time specific
     // group 2:  hvlp1, hvlp2, hvlp3, hvlp4, editron -- basically all inverter data together
-    std::vector<std::string> group1 = {"vig", "pdu", "obc"};
-    std::vector<std::string> group2 = {"hvlp1", "hvlp2", "hvlp3", "hvlp4", "editron"};
+    std::vector<std::string> group1 = {"vig"};
+    std::vector<std::string> group2 = {"hvlp1", "hvlp2", "hvlp3", "hvlp4", "editron", "pdu", "obc"};
 
     std::unordered_map<std::string, Message> group1Messages;
     std::unordered_map<std::string, Message> group2Messages;
@@ -1042,12 +1077,14 @@ int main(int argc, char *argv[]) {
     senderGroup2.start();  // This starts the thread
 
 
+
     //todo handle current discharge and charge basically forward the battery limit to the motors by dividing them properly
     //handle regen if required declare the variable here and handle the functionality
     //dynamic motors are available in the vehicle controls tab
 
     //how to handle sequence of value change like a state machine transition: for each event like when vehicle start, vehicle stop to charging
     //connect for driving handles both charging, driving or regen
+
 
     // CanNonSHMMessageSender nonShmSender(fileParser,messages);
     // nonShmSender.initialize();
