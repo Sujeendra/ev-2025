@@ -262,9 +262,6 @@ void CreateSDMData(QCanDbcFileParser& fileParser, std::unordered_map<std::string
             // Find the matching message in SDM
             Message* result = findMessageInSDM(description.name().toStdString(), messages);
             if (result != nullptr) {
-                // Set message ID
-                quint32 uniqueId = static_cast<quint32>(description.uniqueId());
-                (*result).messageId29Bit =static_cast<int32_t>(uniqueId & 0x7FFFFFFF); // 29-bit message ID
 
                 // Loop over all signal descriptions in the message
                 for (const auto& signal : description.signalDescriptions()) {
@@ -379,21 +376,6 @@ private:
                 canDevice1->writeFrame(frame);
             }
 
-            // Prepare SDM data and send them via CAN bus
-            // for (auto& pair : messages) {
-
-                //     auto& message = pair.second;
-                //     std::string messageId = pair.first;
-
-            //     auto now = std::chrono::steady_clock::now();
-            //     if (now >= nextSendTime[messageId]) {
-            //         CreateSDMData(fileParser, messages);
-            //         QCanBusFrame sdmFrame(message.messageId29Bit, QByteArray(reinterpret_cast<const char*>(message.sdmSignedData.data()), message.sdmSignedData.size()));
-            //         sdmFrame.setFrameType(QCanBusFrame::DataFrame);
-            //         canDevice->writeFrame(sdmFrame);
-            //         nextSendTime[messageId] += std::chrono::milliseconds(static_cast<int>(message.SDM[0].cycleTime));
-            //     }
-            // }
         }
     }
 
