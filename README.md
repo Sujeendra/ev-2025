@@ -12,7 +12,7 @@ If you use this framework in your work, please cite:
 @inproceedings{ramesh2025communication,
   title     = {Communication Framework for Electrified Off-Road Vehicles: A Case Study on the HHEA Compact Track Loader},
   author    = {Sujeendra Ramesh and Perry Y. Li},
-  booktitle = {Proceedings of the [Conference Name]},
+  booktitle = {Proceedings of the IEEE International Conference on Vehicular Electronics and Safety (ICVES)},
   year      = {2025},
   organization = {University of Minnesota, Twin Cities},
   address   = {Minneapolis, USA},
