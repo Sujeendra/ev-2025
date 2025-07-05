@@ -20,8 +20,8 @@ If you use this framework in your work, please cite:
   email     = {rames154@umn.edu, lixxx099@umn.edu}
 }
 ```
-
 ## HHEA: Hybrid Hydraulic Electric Architecture
+
 
 Hello,
 
@@ -36,9 +36,28 @@ This project is a part of [**Dr. Li's Lab**](https://sites.google.com/umn.edu/pe
 - Jacob
 - Mahmud
 - Zihao
-- Professor Severson
+- Dr. Severson
 
-This work is supported by the **U.S. Department of Energy Office of Energy Efficiency and Renewable Energy’s (EERE) Vehicle Technologies Office (VTO)** under grant number **DE-EE0009875**. Their support has been instrumental in enabling the research and development presented in this thesis.
+* This work is supported by the **U.S. Department of Energy Office of Energy Efficiency and Renewable Energy’s (EERE) Vehicle Technologies Office (VTO)** under grant number **DE-EE0009875**. Their support has been instrumental in enabling the research and development presented in this thesis.
+
+### Background on HHEA
+
+The **Hybrid Hydraulic-Electric Architecture (HHEA)** is an advanced powertrain designed for off-road electrified vehicles. The prototype developed for this thesis is an **electrified Compact Track Loader**, which combines the **power density of hydraulics** with the **efficiency and controllability of electric actuation**.
+
+Central to HHEA is a **set of discrete hydraulic pressure rails**, each maintained at different pressure levels. Actuators and motors are connected to valve manifolds that dynamically pair these rails using solenoid valves controlled by the **Vehicle Control Unit (VCU)**. This results in **16 possible pressure pairings**, enabling fine control over actuator force and motor torque.
+
+A **Digital Displacement Pump (DDP)**, driven by a **Danfoss Editron motor and inverter**, supplies and stabilizes the pressure rails based on system demand. Rather than throttling, this centralized flow control enhances energy efficiency.
+
+The system also integrates **four smaller motor-generator (M/G) units** — **Parker GVM210 motors** with **Sevcon inverters** — mounted on hydraulic pump/motor assemblies. These motors serve:
+
+- **Left and right propulsion** (coupled with hydraulic drive motors)
+- **Lift and tilt functions** (paired with hydraulic actuators)
+
+The M/Gs, sized for ~15% of peak power, handle **fine torque modulation**, **pressure boosting**, and **energy recovery**, effectively "bridging the gap" between discrete hydraulic steps and ensuring smooth, responsive control.
+
+This hybrid approach achieves high efficiency, dynamic performance, and robust control for complex vehicle subsystems.
+
+---
 
 If you have any questions, please feel free to contact me at [rames154@umn.edu](mailto:rames154@umn.edu).
 
