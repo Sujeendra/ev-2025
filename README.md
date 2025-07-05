@@ -20,3 +20,30 @@ If you use this framework in your work, please cite:
   email     = {rames154@umn.edu, lixxx099@umn.edu}
 }
 ```
+
+## HHEA: Hybrid Hydraulic Electric Architecture
+
+<div style="text-align: center;">
+  <img src="../img/sujee.jpeg" alt="sujee" width="400">
+</div>
+
+Hello,
+
+I am **Sujeendra Ramesh**, and this innovative software framework was developed as part of my master's thesis at the **University of Minnesota, Twin Cities**, in the field of robotics in 2025.
+
+This project is a part of [**Dr. Li's Lab**](https://sites.google.com/umn.edu/perry-li/research/miml?authuser=0), and the project name is **HHEA (Hybrid Hydraulic Electric Architecture)**. I would like to extend my gratitude to my entire team, including:
+
+- Dr. Li
+- Jim
+- Ravi
+- Jackson
+- Jacob
+- Mahmud
+- Zihao
+- Professor Severson
+
+This work is supported by the **U.S. Department of Energy Office of Energy Efficiency and Renewable Energy’s (EERE) Vehicle Technologies Office (VTO)** under grant number **DE-EE0009875**. Their support has been instrumental in enabling the research and development presented in this thesis.
+
+If you have any questions, please feel free to contact me at [rames154@umn.edu](mailto:rames154@umn.edu).
+
+---
