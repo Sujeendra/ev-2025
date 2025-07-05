@@ -23,10 +23,6 @@ If you use this framework in your work, please cite:
 
 ## HHEA: Hybrid Hydraulic Electric Architecture
 
-<div style="text-align: center;">
-  <img src="../img/sujee.jpeg" alt="sujee" width="400">
-</div>
-
 Hello,
 
 I am **Sujeendra Ramesh**, and this innovative software framework was developed as part of my master's thesis at the **University of Minnesota, Twin Cities**, in the field of robotics in 2025.
