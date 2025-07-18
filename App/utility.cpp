@@ -30,61 +30,103 @@ uint32_t ReverseByteOrder(uint32_t value) {
            ((value & 0x000000FF) << 24);   // Move byte 3 to byte 0
 }
 
-void encodeSignal(double value, double offset, double scale, int startBit, int length, std::array<uint8_t, 8>& data, QSysInfo::Endian byteOrder
-                  ,QtCanBus::DataFormat dataformat) {
-    // Calculate adjusted binary value
+void encodeSignal(double value, double offset, double scale, int startBit, int length,
+                  std::array<uint8_t, 8>& data, QSysInfo::Endian byteOrder,
+                  QtCanBus::DataFormat dataformat) {
+
     double adjustedValue = (value - offset) / scale;
     int binaryValue = static_cast<int>(adjustedValue);
-    // If the signal is signed, convert negative values to two’s complement
+
     if (dataformat == QtCanBus::DataFormat::SignedInteger && binaryValue < 0) {
-        binaryValue = (1 << length) + binaryValue; // Convert to two's complement
+        binaryValue = (1 << length) + binaryValue; // two's complement
     }
+
+    std::array<uint8_t, 8> temp = data;
+
     for (int i = 0; i < length; ++i) {
         int bitPosition;
-
-        // Handle bit position based on endianness
         if (byteOrder == QSysInfo::Endian::LittleEndian) {
             bitPosition = startBit + i;
-        } else { // BigEndian
-            bitPosition = startBit -7+i;
+        } else {
+            bitPosition = startBit - 7 + i;
         }
 
         int byteIndex = bitPosition / 8;
         int bitIndex = bitPosition % 8;
 
         if (binaryValue & (1 << i)) {
-            data[byteIndex] |= (1 << bitIndex);  // Set the bit
+            temp[byteIndex] |= (1 << bitIndex);
         } else {
-            data[byteIndex] &= ~(1 << bitIndex); // Clear the bit
+            temp[byteIndex] &= ~(1 << bitIndex);
         }
     }
+
+    // Apply byte reversal for BigEndian
+    if (byteOrder == QSysInfo::Endian::BigEndian) {
+        int firstBit = startBit - 7;
+        int lastBit = startBit + length - 8;
+        int startByte = firstBit / 8;
+        int endByte = lastBit / 8;
+
+        int left = startByte;
+        int right = endByte;
+
+        while (left < right) {
+            std::swap(temp[left], temp[right]);
+            left++;
+            right--;
+        }
+    }
+
+    data = temp;
 }
 
-double decodeSignal(const uint8_t data[8], double offset, double scale, int startBit, int length, QSysInfo::Endian byteOrder, QtCanBus::DataFormat dataformat) {
-    int binaryValue = 0;
 
+double decodeSignal(const uint8_t data[8], double offset, double scale, int startBit, int length,
+                    QSysInfo::Endian byteOrder, QtCanBus::DataFormat dataformat) {
+
+    std::array<uint8_t, 8> temp;
+    std::copy(data, data + 8, temp.begin());
+
+    // Reverse byte window for BigEndian
+    if (byteOrder == QSysInfo::Endian::BigEndian) {
+        int firstBit = startBit - 7;
+        int lastBit = startBit + length - 8;
+        int startByte = firstBit / 8;
+        int endByte = lastBit / 8;
+
+        int left = startByte;
+        int right = endByte;
+
+        while (left < right) {
+            std::swap(temp[left], temp[right]);
+            left++;
+            right--;
+        }
+    }
+
+    int binaryValue = 0;
     for (int i = 0; i < length; ++i) {
         int bitPosition;
-
-        // Handle bit position based on endianness
         if (byteOrder == QSysInfo::Endian::LittleEndian) {
             bitPosition = startBit + i;
-        } else { // BigEndian
-            bitPosition = startBit -7+i;
+        } else {
+            bitPosition = startBit - 7 + i;
         }
 
         int byteIndex = bitPosition / 8;
         int bitIndex = bitPosition % 8;
 
-        if (data[byteIndex] & (1 << bitIndex)) {
+        if (temp[byteIndex] & (1 << bitIndex)) {
             binaryValue |= (1 << i);
         }
-        // If the signal is signed, interpret as two's complement : to check the working
-        if (dataformat == QtCanBus::DataFormat::SignedInteger && (binaryValue & (1 << (length - 1)))) {
-            // Extend the sign bit
-            binaryValue -= (1 << length);
-        }
     }
+
+    if (dataformat == QtCanBus::DataFormat::SignedInteger &&
+        (binaryValue & (1 << (length - 1)))) {
+        binaryValue -= (1 << length);  // sign extend
+    }
+
     return (binaryValue * scale) + offset;
 }
 
