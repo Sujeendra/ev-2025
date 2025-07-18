@@ -46,7 +46,7 @@ void encodeSignal(double value, double offset, double scale, int startBit, int l
         if (byteOrder == QSysInfo::Endian::LittleEndian) {
             bitPosition = startBit + i;
         } else { // BigEndian
-            bitPosition = startBit + length / 2 - 1 - i;
+            bitPosition = startBit -7+i;
         }
 
         int byteIndex = bitPosition / 8;
@@ -70,7 +70,7 @@ double decodeSignal(const uint8_t data[8], double offset, double scale, int star
         if (byteOrder == QSysInfo::Endian::LittleEndian) {
             bitPosition = startBit + i;
         } else { // BigEndian
-            bitPosition = startBit + length / 2 - 1 - i;
+            bitPosition = startBit -7+i;
         }
 
         int byteIndex = bitPosition / 8;
