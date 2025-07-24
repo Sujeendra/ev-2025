@@ -50,7 +50,7 @@ void encodeSignal(double value, double offset, double scale, int startBit, int l
 	        i=ii;
         } else { // BigEndian
            rev_bitPosition = rev_startBit + ii;
-           bitPosition =(rev_bitPosition/8)*8 +7- (rev_BitPosition%8);
+           bitPosition =(rev_bitPosition/8)*8 +7- (rev_bitPosition%8);
 	        i=length-1-ii;
         }
 
@@ -77,7 +77,7 @@ double decodeSignal(const uint8_t data[8], double offset, double scale, int star
             i=ii;
         } else { // BigEndian
            rev_bitPosition = rev_startBit + ii;
-           bitPosition =(rev_bitPosition/8)*8 +7- (revBitPosition%8);
+           bitPosition =(rev_bitPosition/8)*8 +7- (rev_bitPosition%8);
            i=length-1-ii;
         }
 
